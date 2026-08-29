@@ -13,24 +13,27 @@
 #import "QuickSwitchTableView.h"
 #import "ContextHostManager.h"
 
-#import "IPC.h"
 #import "headers.h"
 
 
 @interface PullOverViewController : UIViewController <UIScrollViewDelegate, POHandleDelegate, QuickSwitchSelectionDelegate>
 
 -(void)close;
--(void)endHosting;
+-(void)forceCloseAndReleaseImmediately;
+-(void)prepareForNativeApplicationTakeover:(NSString *)bundleId;
+-(void)routeExternalApplicationInsidePullOver:(NSString *)bundleId;
+-(BOOL)openExternallyActivatedApplicationInPullOver:(NSString *)bundleId;
 -(void)applyCurrentSettings;
-// FrontBoard 真实方向更新或 SpringBoard 兼容回调触发窗口旋转前后调用。
 -(void)prepareForOrientationChange;
 -(void)handleOrientationChange;
-@property (nonatomic) BOOL isOpened;
+@property (nonatomic, readonly) BOOL isPanelActive;
+@property (nonatomic, readonly) BOOL isPanelFullyOpen;
+@property (nonatomic, readonly) BOOL isPanelTransitioning;
+
+- (UIView *)interactiveViewForWindowPoint:(CGPoint)point event:(UIEvent *)event;
 
 @property (nonatomic, strong) UIScrollView *scrollView;
 @property (nonatomic, strong) UIScrollView *handleScrollView;
-@property (nonatomic, strong) UIView *backgroundView;
-
 @property (nonatomic, strong) POHandle *handle;
 @property (nonatomic, strong) UIView *contentView;
 

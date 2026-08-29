@@ -2,8 +2,8 @@
 #
 # PullOver X 打包脚本。
 #
-# Xcode compiles the binaries (PullOverX.dylib + PullOverXPreferences.bundle);
-# this script assembles and builds the .deb for the requested jailbreak scheme.
+# Xcode 构建主 tweak 与偏好设置；脚本另构建最小化的相机 daemon dylib，
+# 再按目标越狱环境统一签名并打包。
 #
 # Usage:
 #   ./build.sh [roothide|rootless|rootful] [debug|release]
@@ -31,6 +31,8 @@ POP_ROOTHIDE_LDFLAGS="-lroothide"
 POP_ROOTLESS_LDFLAGS=""
 POP_SCHEME_DEFS="THEOS_PACKAGE_SCHEME_ROOTHIDE=1"
 POP_RPATHS=""
+POP_SCHEME_LIBRARY_DIR="/opt/theos/vendor/lib/iphone/roothide"
+POP_ALTLIST_FRAMEWORK_DIR="$PWD/PullOverXPreferences/Frameworks/_roothide"
 ARCHS="arm64e"
 
 # Jailbreak environment <-> deb architecture / install prefix mapping:
@@ -45,6 +47,7 @@ case "$SCHEME" in
 		PREFIX=""
 		DEB_ARCH="iphoneos-arm64e"
 		ARCHS="arm64 arm64e"
+		POP_ALTLIST_FRAMEWORK_DIR="$PWD/PullOverXPreferences/Frameworks/_roothide"
 		;;
 	rootless)
 		PREFIX="/var/jb"
@@ -52,7 +55,9 @@ case "$SCHEME" in
 		ARCHS="arm64 arm64e"
 		POP_ROOTHIDE_LDFLAGS=""
 		POP_ROOTLESS_LDFLAGS="-lroot"
-		POP_SCHEME_DEFS="ROOTHIDE_USE_STUB=1 POP_PACKAGE_SCHEME_ROOTLESS=1"
+		POP_SCHEME_DEFS="POP_PACKAGE_SCHEME_ROOTLESS=1"
+		POP_SCHEME_LIBRARY_DIR="/opt/theos/vendor/lib/iphone/rootless"
+		POP_ALTLIST_FRAMEWORK_DIR="$PWD/PullOverXPreferences/Frameworks/_rootless"
 		# Rootless v2 supports both the conventional and relocated jbroot rpaths.
 		POP_RPATHS="/var/jb/usr/lib /var/jb/Library/Frameworks @loader_path/.jbroot/usr/lib @loader_path/.jbroot/Library/Frameworks"
 		;;
@@ -61,7 +66,9 @@ case "$SCHEME" in
 		DEB_ARCH="iphoneos-arm"
 		ARCHS="arm64"
 		POP_ROOTHIDE_LDFLAGS=""
-		POP_SCHEME_DEFS="ROOTHIDE_USE_STUB=1 POP_PACKAGE_SCHEME_ROOTFUL=1"
+		POP_SCHEME_DEFS="POP_PACKAGE_SCHEME_ROOTFUL=1"
+		POP_SCHEME_LIBRARY_DIR="/opt/theos/vendor/lib"
+		POP_ALTLIST_FRAMEWORK_DIR="$PWD/PullOverXPreferences/Frameworks"
 		POP_RPATHS="/usr/lib /Library/Frameworks"
 		;;
 	*)
@@ -92,32 +99,73 @@ XCB_COMMON=(
 	VALID_ARCHS="$ARCHS"
 	ONLY_ACTIVE_ARCH=NO
 	POP_SCHEME="$SCHEME"
+	POP_SCHEME_LIBRARY_DIR="$POP_SCHEME_LIBRARY_DIR"
+	POP_ALTLIST_FRAMEWORK_DIR="$POP_ALTLIST_FRAMEWORK_DIR"
 	POP_ROOTHIDE_LDFLAGS="$POP_ROOTHIDE_LDFLAGS"
 	POP_ROOTLESS_LDFLAGS="$POP_ROOTLESS_LDFLAGS"
 	POP_SCHEME_DEFS="$POP_SCHEME_DEFS"
 	LD_RUNPATH_SEARCH_PATHS="$POP_RPATHS"
 	CONFIGURATION_BUILD_DIR="$PRODUCTS_DIR"
+	STRIP_INSTALLED_PRODUCT=YES
+	STRIP_STYLE=non-global
 	CODE_SIGNING_ALLOWED=NO
 	CODE_SIGNING_REQUIRED=NO
 )
 
-for TARGET in PullOverXPreferences PullOverX; do
-	echo "==> xcodebuild scheme $TARGET"
-	xcodebuild -scheme "$TARGET" "${XCB_COMMON[@]}" build
-done
+# PullOverX 已在 Xcode 工程中依赖 PullOverXPreferences；构建主 scheme
+# 会一次生成两个产物，无需先重复构建偏好设置包。
+echo "==> xcodebuild scheme PullOverX"
+xcodebuild -scheme PullOverX "${XCB_COMMON[@]}" build
 
 DYLIB="$PRODUCTS_DIR/PullOverX.dylib"
+CAMERA_DYLIB="$PRODUCTS_DIR/PullOverXCamera.dylib"
+CAMERA_SOURCE="$PWD/PullOverX/POCameraCompatibility.m"
 BUNDLE="$PRODUCTS_DIR/PullOverXPreferences.bundle"
 
 [ -f "$DYLIB" ]   || { echo "error: $DYLIB not built"; exit 1; }
 [ -d "$BUNDLE" ]  || { echo "error: $BUNDLE not built"; exit 1; }
 
-# ---- Fake-sign the binaries (jailbreak load requirement) ---------------------
-if command -v ldid >/dev/null 2>&1; then
-	echo "==> ldid -S (ad-hoc signing)"
-	ldid -S "$DYLIB"
-	ldid -S "$BUNDLE/PullOverXPreferences"
+# 相机兼容只注入媒体 daemon，避免把 SpringBoard 私有依赖带入 mediaserverd。
+echo "==> Building PullOverXCamera.dylib"
+SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
+CAMERA_ARCH_OUTPUTS=()
+CAMERA_RPATH_FLAGS=""
+for RPATH in $POP_RPATHS; do
+	CAMERA_RPATH_FLAGS="$CAMERA_RPATH_FLAGS -Wl,-rpath,$RPATH"
+done
+for ARCH in $ARCHS; do
+	CAMERA_ARCH_DYLIB="$BUILD_DIR/PullOverXCamera-$ARCH.dylib"
+	xcrun --sdk iphoneos clang \
+		-arch "$ARCH" \
+		-isysroot "$SDK_PATH" \
+		-miphoneos-version-min=14.0 \
+		-Os -fobjc-arc -dynamiclib \
+		-L"$POP_SCHEME_LIBRARY_DIR" -L/opt/theos/vendor/lib \
+		$CAMERA_RPATH_FLAGS \
+		-Wl,-dead_strip \
+		-Wl,-install_name,/Library/MobileSubstrate/DynamicLibraries/PullOverXCamera.dylib \
+		-lsubstrate -framework Foundation \
+		"$CAMERA_SOURCE" -o "$CAMERA_ARCH_DYLIB"
+	CAMERA_ARCH_OUTPUTS+=("$CAMERA_ARCH_DYLIB")
+done
+if [ "${#CAMERA_ARCH_OUTPUTS[@]}" -eq 1 ]; then
+	cp "${CAMERA_ARCH_OUTPUTS[0]}" "$CAMERA_DYLIB"
+else
+	lipo -create "${CAMERA_ARCH_OUTPUTS[@]}" -output "$CAMERA_DYLIB"
 fi
+
+# ---- Ad-hoc sign the binaries (jailbreak load requirement) -------------------
+command -v codesign >/dev/null 2>&1 || {
+	echo "error: codesign is required to sign jailbreak binaries"
+	exit 1
+}
+echo "==> codesign - (ad-hoc signing)"
+codesign --force --sign - --timestamp=none "$DYLIB"
+codesign --force --sign - --timestamp=none "$CAMERA_DYLIB"
+codesign --force --sign - --timestamp=none "$BUNDLE/PullOverXPreferences"
+codesign --verify --strict "$DYLIB"
+codesign --verify --strict "$CAMERA_DYLIB"
+codesign --verify --strict "$BUNDLE/PullOverXPreferences"
 
 # ---- Assemble the package staging tree ---------------------------------------
 STAGE="$BUILD_DIR/stage"
@@ -127,8 +175,11 @@ ROOT="$STAGE$PREFIX"
 # Tweak dylib + MobileSubstrate filter
 mkdir -p "$ROOT/Library/MobileSubstrate/DynamicLibraries"
 cp "$DYLIB" "$ROOT/Library/MobileSubstrate/DynamicLibraries/PullOverX.dylib"
+cp "$CAMERA_DYLIB" "$ROOT/Library/MobileSubstrate/DynamicLibraries/PullOverXCamera.dylib"
 cp "PullOverX/Package/Library/MobileSubstrate/DynamicLibraries/PullOverX.plist" \
    "$ROOT/Library/MobileSubstrate/DynamicLibraries/PullOverX.plist"
+cp "PullOverX/Package/Library/MobileSubstrate/DynamicLibraries/PullOverXCamera.plist" \
+   "$ROOT/Library/MobileSubstrate/DynamicLibraries/PullOverXCamera.plist"
 
 # Preference bundle (built) + bundled resources
 mkdir -p "$ROOT/Library/PreferenceBundles"

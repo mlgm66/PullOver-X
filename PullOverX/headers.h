@@ -5,30 +5,8 @@
 //  Created by Will Smillie on 4/8/19.
 //
 
-@interface UIDevice (mh)
--(void)setOrientation:(long long)arg1 animated:(BOOL)arg2 ;
-@end
-
 @interface SpringBoard
 -(id)_accessibilityFrontMostApplication;
--(void)_relaunchSpringBoardNow;
--(BOOL)isLocked;
--(long long)activeInterfaceOrientation;
--(long long)_currentNonFlatDeviceOrientation;
-@end
-
-@interface UIApplication (MHXI)
--(void)_setForcedUserInterfaceLayoutDirection:(long long)arg1 ;
-+(id)sharedApplication;
-- (id)_mainScene;
-+(NSString *)displayIdentifier;
--(void) RA_updateWindowsForSizeChange:(CGSize)size isReverting:(BOOL)revert;
--(void) RA_forceRotationToInterfaceOrientation:(UIInterfaceOrientation)orientation isReverting:(BOOL)reverting;
--(BOOL)_isSupportedOrientation:(long long)arg1 ;
--(void)noteActiveInterfaceOrientationWillChangeToOrientation:(long long)arg1 ;
--(void)_setStatusBarOrientation:(long long)arg1 animated:(BOOL)arg2 ;
--(id)statusBarWindow;
--(void)terminateWithSuccess;
 @end
 
 
@@ -50,50 +28,21 @@
 -(void)grabberTongueCanceledPulling:(id)arg1 withDistance:(double)arg2 andVelocity:(double)arg3 ;
 @end
 
-@interface SBLockStateAggregator : NSObject
-+(id)sharedInstance;
--(unsigned long long)lockState;
-@end
+@class SBIcon;
+@class SBIconModel;
+@class SBHIconImageCache;
 
-
-typedef struct SBIconImageInfo {
-    CGSize size;
-    double scale;
-    double continuousCornerRadius;
-} SBIconImageInfo;
-
-@interface SBIcon : NSObject
-@property (nonatomic, retain) NSString* applicationBundleID;
--(NSString*)displayNameForLocation:(NSInteger)location;
--(UIImage*)generateIconImage:(int)arg1;
--(id)generateIconImageWithInfo:(SBIconImageInfo)arg1 ;
-@end
-@interface SBIconView : UIView
-@property (nonatomic, retain) SBIcon* icon;
-@end
 @interface SBIconModel : NSObject
--(id)expectedIconForDisplayIdentifier:(NSString*)ident;
+- (SBIcon *)applicationIconForBundleIdentifier:(NSString *)identifier;
 @end
-@interface SBRootFolderController : NSObject
-@property (nonatomic, retain) UIView* contentView;
+
+@interface SBHIconImageCache : NSObject
+- (UIImage *)imageForIcon:(SBIcon *)icon;
 @end
+
 @interface SBIconController : NSObject
 +(id)sharedInstance;
-@property (nonatomic, retain) SBIconModel* model;
-@property (nonatomic, assign) BOOL isEditing;
--(UIView*)currentRootIconList;
--(UIView*)dockListView;
--(SBRootFolderController*)_rootFolderController;
--(SBRootFolderController*)_currentFolderController;
--(void)clearHighlightedIcon;
--(NSInteger)currentIconListIndex;
--(void)removeIcon:(id)arg1 compactFolder:(BOOL)arg2;
--(id)insertIcon:(id)arg1 intoListView:(id)arg2 iconIndex:(long long)arg3 moveNow:(BOOL)arg4 pop:(BOOL)arg5;
--(id)rootFolder;
--(UIView*)iconListViewAtIndex:(NSInteger)index inFolder:(id)folder createIfNecessary:(BOOL)create;
--(BOOL)scrollToIconListAtIndex:(long long)arg1 animate:(BOOL)arg2;
--(NSArray*)allApplications;
--(BOOL)_canRevealShortcutMenu;
--(void)_revealMenuForIconView:(SBIconView*)icon presentImmediately:(BOOL)immediately;
--(void)_dismissShortcutMenuAnimated:(BOOL)animated completionHandler:(id)completionHandler;
+@property (readonly, nonatomic) SBIconModel *iconModel;
+@property (nonatomic, retain) SBIconModel *model;
+@property (readonly, nonatomic) SBHIconImageCache *tableUIIconImageCache;
 @end

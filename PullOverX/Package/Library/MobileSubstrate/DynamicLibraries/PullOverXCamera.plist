@@ -4,9 +4,10 @@
 <dict>
 	<key>Filter</key>
 	<dict>
-		<key>Bundles</key>
+		<key>Executables</key>
 		<array>
-			<string>com.apple.springboard</string>
+			<string>mediaserverd</string>
+			<string>cameracaptured</string>
 		</array>
 	</dict>
 </dict>

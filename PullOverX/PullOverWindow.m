@@ -6,6 +6,8 @@
 //
 
 #import "PullOverWindow.h"
+#import "ContextHostManager.h"
+#import <objc/message.h>
 
 @interface UIWindow (PORotationPrivate)
 - (void)_rotateWindowToOrientation:(long long)orientation
@@ -15,21 +17,74 @@
 @end
 
 @interface PullOverWindow ()
-@property (nonatomic, assign) UIInterfaceOrientation pullOverInterfaceOrientation;
+@property (nonatomic, assign, readwrite) UIInterfaceOrientation pullOverInterfaceOrientation;
 @property (nonatomic, assign) NSUInteger orientationLayoutGeneration;
+@property (nonatomic, assign) BOOL orientationTransitionInFlight;
 - (void)applyPreferredWindowLevel;
-- (void)ensureBoundToMainScene;
+- (BOOL)ensureBoundToMainScene;
+- (void)normalizeWindowPlacement;
 @end
+
+static CGRect POSceneBoundsForRotation(UIWindowScene *scene) {
+    if (!scene) {
+        return CGRectZero;
+    }
+    SEL boundsSelector = NSSelectorFromString(@"bounds");
+    if ([scene respondsToSelector:boundsSelector]) {
+        return ((CGRect (*)(id, SEL))objc_msgSend)(scene, boundsSelector);
+    }
+    return scene.coordinateSpace.bounds;
+}
+
+static BOOL POUseSceneCompatibleWindowGeometry(UIWindowScene *scene) {
+    (void)scene;
+    return NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26;
+}
+
+static BOOL POIsConcreteWindowOrientation(UIInterfaceOrientation orientation) {
+    return orientation == UIInterfaceOrientationPortrait ||
+        orientation == UIInterfaceOrientationPortraitUpsideDown ||
+        orientation == UIInterfaceOrientationLandscapeLeft ||
+        orientation == UIInterfaceOrientationLandscapeRight;
+}
+
+static UIInterfaceOrientation POCurrentWindowOrientation(UIWindowScene *scene,
+                                                         UIInterfaceOrientation fallback) {
+    if (POIsConcreteWindowOrientation(fallback)) {
+        return fallback;
+    }
+    UIInterfaceOrientation orientation =
+        [[ContextHostManager sharedInstance] currentSystemInterfaceOrientation];
+    if (POIsConcreteWindowOrientation(orientation)) {
+        return orientation;
+    }
+    CGRect screenBounds = scene.screen.bounds;
+    return CGRectGetWidth(screenBounds) > CGRectGetHeight(screenBounds)
+        ? UIInterfaceOrientationLandscapeRight
+        : UIInterfaceOrientationPortrait;
+}
+
+static CGAffineTransform POOrientationTransform(UIInterfaceOrientation orientation) {
+    switch (orientation) {
+        case UIInterfaceOrientationLandscapeRight:
+            return CGAffineTransformMakeRotation((CGFloat)M_PI_2);
+        case UIInterfaceOrientationLandscapeLeft:
+            return CGAffineTransformMakeRotation((CGFloat)-M_PI_2);
+        case UIInterfaceOrientationPortraitUpsideDown:
+            return CGAffineTransformMakeRotation((CGFloat)M_PI);
+        case UIInterfaceOrientationPortrait:
+        default:
+            return CGAffineTransformIdentity;
+    }
+}
 
 @implementation PullOverWindow
 @synthesize controller;
 
 - (void)applyPreferredWindowLevel {
     // 主 scene 内参考：
-    // SBRootSceneWindow=0（App 挂载）、SBMainSwitcherWindow=5、
     // SBStatusBarWindow=999、SBControlCenterWindow=1080。
     // 100 盖过 App，且明确低于状态栏 / 控制中心。
-    // 前提是绑在 com.apple.springboard 主 scene；绑到 SystemAperture 时任何 level 都会盖过 CC。
     self.windowLevel = 100.0;
 }
 
@@ -43,10 +98,6 @@
 }
 
 + (UIWindowScene *)activeWindowScene {
-    // 必须绑定到 SpringBoard 主 scene（identifier: com.apple.springboard）。
-    // 控制中心、状态栏都在这个 scene；同 scene 后 windowLevel 才可比较。
-    // 不能用 foregroundActive：SystemAperture（灵动岛）也是 foregroundActive，
-    // 绑到它会让 PO 整体浮在一切之上并盖过控制中心。
     UIWindowScene *springboardClassScene = nil;
     UIWindowScene *fallback = nil;
 
@@ -73,7 +124,6 @@
             continue;
         }
 
-        // 次选：SBWindowScene（主 identifier 偶发读不到时的兜底）。
         if (!springboardClassScene && [className isEqualToString:@"SBWindowScene"]) {
             springboardClassScene = windowScene;
             continue;
@@ -87,18 +137,129 @@
     return springboardClassScene ?: fallback;
 }
 
-- (void)ensureBoundToMainScene {
+- (BOOL)ensureBoundToMainScene {
     UIWindowScene *mainScene = [PullOverWindow activeWindowScene];
     if (!mainScene || self.windowScene == mainScene) {
-        return;
+        return NO;
     }
 
-    // 初始化时主 scene 可能尚未就绪，先落到 fallback；显示/布局时再纠正。
     self.windowScene = mainScene;
     CGRect bounds = mainScene.coordinateSpace.bounds;
     if (!CGRectIsEmpty(bounds)) {
         self.frame = bounds;
     }
+    return YES;
+}
+
+- (void)normalizeWindowPlacement {
+    UIWindowScene *scene = self.windowScene ?: [PullOverWindow activeWindowScene];
+    if (POUseSceneCompatibleWindowGeometry(scene) && !scene) {
+        return;
+    }
+    CGRect sceneBounds = scene ? scene.coordinateSpace.bounds : UIScreen.mainScreen.bounds;
+    if (CGRectIsEmpty(sceneBounds)) {
+        return;
+    }
+
+    CGRect bounds = self.bounds;
+    UIInterfaceOrientation orientation = self.pullOverInterfaceOrientation;
+    BOOL concreteOrientation = orientation == UIInterfaceOrientationPortrait ||
+        orientation == UIInterfaceOrientationPortraitUpsideDown ||
+        orientation == UIInterfaceOrientationLandscapeLeft ||
+        orientation == UIInterfaceOrientationLandscapeRight;
+    if (POUseSceneCompatibleWindowGeometry(scene)) {
+        bounds.size = sceneBounds.size;
+    } else if (concreteOrientation) {
+        CGFloat shortSide = MIN(CGRectGetWidth(sceneBounds), CGRectGetHeight(sceneBounds));
+        CGFloat longSide = MAX(CGRectGetWidth(sceneBounds), CGRectGetHeight(sceneBounds));
+        CGSize expectedSize = UIInterfaceOrientationIsLandscape(orientation)
+            ? CGSizeMake(longSide, shortSide)
+            : CGSizeMake(shortSide, longSide);
+        if (fabs(bounds.size.width - expectedSize.width) > 0.25 ||
+            fabs(bounds.size.height - expectedSize.height) > 0.25) {
+            bounds.size = expectedSize;
+        }
+    }
+    bounds.origin = CGPointZero;
+    if (!CGRectEqualToRect(self.bounds, bounds)) {
+        self.bounds = bounds;
+    }
+
+    CGPoint targetCenter = CGPointMake(CGRectGetMidX(bounds), CGRectGetMidY(bounds));
+    CGPoint center = self.center;
+    if (fabs(center.x - targetCenter.x) > 0.25 || fabs(center.y - targetCenter.y) > 0.25) {
+        self.center = targetCenter;
+    }
+}
+
+- (void)applySceneCompatibleRootGeometryAnimated:(BOOL)animated
+                                         duration:(NSTimeInterval)duration
+                                       completion:(void (^)(BOOL finished))completion {
+    if (!POUseSceneCompatibleWindowGeometry(self.windowScene) || !self.rootViewController.isViewLoaded) {
+        if (completion) {
+            completion(NO);
+        }
+        return;
+    }
+
+    CGRect sceneBounds = POSceneBoundsForRotation(self.windowScene);
+    if (CGRectIsEmpty(sceneBounds)) {
+        if (completion) {
+            completion(NO);
+        }
+        return;
+    }
+
+    UIInterfaceOrientation orientation = POCurrentWindowOrientation(self.windowScene,
+                                                                     self.pullOverInterfaceOrientation);
+    CGFloat shortSide = MIN(CGRectGetWidth(sceneBounds), CGRectGetHeight(sceneBounds));
+    CGFloat longSide = MAX(CGRectGetWidth(sceneBounds), CGRectGetHeight(sceneBounds));
+    CGSize contentSize = UIInterfaceOrientationIsLandscape(orientation)
+        ? CGSizeMake(longSide, shortSide)
+        : CGSizeMake(shortSide, longSide);
+
+    UIView *rootView = self.rootViewController.view;
+    void (^changes)(void) = ^{
+        [self normalizeWindowPlacement];
+        rootView.transform = POOrientationTransform(orientation);
+        rootView.bounds = (CGRect){ CGPointZero, contentSize };
+        rootView.center = CGPointMake(CGRectGetMidX(sceneBounds), CGRectGetMidY(sceneBounds));
+    };
+
+    if (!animated || duration <= 0) {
+        [UIView performWithoutAnimation:changes];
+        if (completion) {
+            completion(YES);
+        }
+        return;
+    }
+
+    Class animatorClass = NSClassFromString(@"UIStatusBarAnimationParameters");
+    Class parametersClass = NSClassFromString(@"UIStatusBarOrientationAnimationParameters");
+    SEL animateSelector = NSSelectorFromString(@"animateWithParameters:fromCurrentState:animations:completion:");
+    id parameters = parametersClass ? [parametersClass new] : nil;
+    if (animatorClass && parameters && [animatorClass respondsToSelector:animateSelector]) {
+        ((void (*)(id, SEL, id, BOOL, id, id))objc_msgSend)(
+            animatorClass,
+            animateSelector,
+            parameters,
+            YES,
+            changes,
+            completion);
+        return;
+    }
+
+    [UIView animateWithDuration:duration
+                          delay:0
+                        options:(UIViewAnimationOptionBeginFromCurrentState |
+                                 UIViewAnimationOptionAllowUserInteraction |
+                                 UIViewAnimationOptionCurveEaseInOut)
+                     animations:changes
+                     completion:completion];
+}
+
+- (void)applySceneCompatibleRootGeometry {
+    [self applySceneCompatibleRootGeometryAnimated:NO duration:0 completion:nil];
 }
 
 - (id)init {
@@ -115,11 +276,12 @@
     if (self) {
         self.pullOverInterfaceOrientation = UIInterfaceOrientationUnknown;
         self.orientationLayoutGeneration = 0;
+        self.orientationTransitionInFlight = NO;
         [self applyPreferredWindowLevel];
-        [self setHidden:NO];
-        self.alpha = 1;
         self.rootViewController = controller = [[PullOverViewController alloc] init];
-        self.userInteractionEnabled = YES;
+        [self setHidden:YES];
+        self.rootViewController.view.alpha = 0;
+        self.userInteractionEnabled = NO;
         self.backgroundColor = [UIColor clearColor];
     }
     return self;
@@ -127,7 +289,7 @@
 
 - (BOOL)applyInterfaceOrientation:(UIInterfaceOrientation)orientation
                          duration:(NSTimeInterval)duration
-                            force:(BOOL)force {
+                       completion:(void (^)(void))completion {
     BOOL validOrientation = orientation == UIInterfaceOrientationPortrait ||
         orientation == UIInterfaceOrientationPortraitUpsideDown ||
         orientation == UIInterfaceOrientationLandscapeLeft ||
@@ -136,31 +298,46 @@
         return NO;
     }
 
+    BOOL sceneRebound = [self ensureBoundToMainScene];
     BOOL orientationChanged = self.pullOverInterfaceOrientation != orientation;
-    if (!force && !orientationChanged) {
-        [self requestLayoutFromCurrentScene];
+
+    if (!orientationChanged && !sceneRebound) {
+        if (!self.orientationTransitionInFlight) {
+            [self normalizeWindowPlacement];
+        }
+        if (completion) {
+            dispatch_async(dispatch_get_main_queue(), completion);
+        }
         return YES;
     }
 
     SEL rotateSelector = @selector(_rotateWindowToOrientation:updateStatusBar:duration:skipCallbacks:);
-    if (![self respondsToSelector:rotateSelector]) {
-        // 旧系统没有该入口时保留 SpringBoard 原有的场景旋转行为，不能冒险伪造窗口 frame。
-        [self requestLayoutFromCurrentScene];
+    if ((orientationChanged || sceneRebound) &&
+        !POUseSceneCompatibleWindowGeometry(self.windowScene) &&
+        ![UIWindow instancesRespondToSelector:rotateSelector]) {
         return NO;
     }
 
-    self.pullOverInterfaceOrientation = orientation;
-    NSTimeInterval animationDuration = MAX(0, duration);
     NSUInteger generation = ++self.orientationLayoutGeneration;
-
-    [self _rotateWindowToOrientation:orientation
-                    updateStatusBar:NO
-                           duration:animationDuration
-                      skipCallbacks:NO];
-
-    // 重要：SpringBoard 对这个悬浮窗口通常保留竖屏坐标空间，不能用 bounds 宽高比
-    // 判断“是否已转到横屏”。布局仍走两阶段：立即一帧 + 动画结束后再一帧。
-    [self requestLayoutFromCurrentScene];
+    BOOL visible = !self.hidden && self.rootViewController.view.alpha > 0.01;
+    NSTimeInterval animationDuration = duration > 0
+        ? duration
+        : (visible ? 0.25 : 0);
+    if (orientationChanged || sceneRebound) {
+        self.orientationTransitionInFlight = YES;
+        self.pullOverInterfaceOrientation = orientation;
+        [ContextHostManager sharedInstance].presentationInterfaceOrientation = orientation;
+        if (POUseSceneCompatibleWindowGeometry(self.windowScene)) {
+            [self applySceneCompatibleRootGeometryAnimated:animationDuration > 0
+                                                   duration:animationDuration
+                                                 completion:nil];
+        } else {
+            [super _rotateWindowToOrientation:orientation
+                             updateStatusBar:NO
+                                    duration:animationDuration
+                               skipCallbacks:NO];
+        }
+    }
 
     __weak typeof(self) weakSelf = self;
     dispatch_block_t finishLayout = ^{
@@ -168,7 +345,11 @@
         if (!strongSelf || generation != strongSelf.orientationLayoutGeneration) {
             return;
         }
+        strongSelf.orientationTransitionInFlight = NO;
         [strongSelf requestLayoutFromCurrentScene];
+        if (completion) {
+            completion();
+        }
     };
     if (animationDuration > 0) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(animationDuration * NSEC_PER_SEC)),
@@ -179,15 +360,22 @@
     return YES;
 }
 
+- (void)_rotateWindowToOrientation:(long long)__unused orientation
+                   updateStatusBar:(BOOL)__unused updateStatusBar
+                          duration:(double)__unused duration
+                     skipCallbacks:(BOOL)__unused skipCallbacks {
+}
+
 - (void)requestLayoutFromCurrentScene {
     [self ensureBoundToMainScene];
     [self applyPreferredWindowLevel];
-    // UIWindowScene 管理窗口尺寸。SpringBoard 对该悬浮窗口保留竖屏坐标，
-    // 手动设置横屏 frame 会导致右侧和把手被裁剪；这里只触发布局刷新。
+    [self normalizeWindowPlacement];
     [self setNeedsLayout];
     [self layoutIfNeeded];
     [self.rootViewController.view setNeedsLayout];
     [self.rootViewController.view layoutIfNeeded];
+    [self applySceneCompatibleRootGeometry];
+    [[ContextHostManager sharedInstance] refreshPresentationForCurrentOrientation];
     [self.controller handleOrientationChange];
 }
 
@@ -195,6 +383,26 @@
     [self ensureBoundToMainScene];
     [self applyPreferredWindowLevel];
     [super makeKeyAndVisible];
+    [self applySceneCompatibleRootGeometry];
+    if (!self.orientationTransitionInFlight) {
+        [self normalizeWindowPlacement];
+    }
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    if (!self.orientationTransitionInFlight) {
+        [self applySceneCompatibleRootGeometry];
+        [self normalizeWindowPlacement];
+    }
+}
+
+- (void)safeAreaInsetsDidChange {
+    [super safeAreaInsetsDidChange];
+    if (!self.orientationTransitionInFlight) {
+        [self applySceneCompatibleRootGeometry];
+        [self normalizeWindowPlacement];
+    }
 }
 
 - (bool)_shouldCreateContextAsSecure {
@@ -202,26 +410,7 @@
 }
 
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    UIView *hitTestResult = [super hitTest:point withEvent:event];
-
-    if ([controller isOpened]) {
-        return hitTestResult;
-    }
-
-    POHandle *handle = controller.handle;
-    if (handle) {
-        // 用把手的扩大命中区（POHandle -pointInside: 已外扩到 ≥52pt）判定，
-        // 而非要求触摸点精确落在把手图标上。手指略偏或长按微移时仍稳稳
-        // 命中把手，不会穿透到桌面。
-        CGPoint pointInHandle = [handle convertPoint:point fromView:self];
-        if ([handle pointInside:pointInHandle withEvent:event]) {
-            return handle;
-        }
-    }
-    if ([hitTestResult isKindOfClass:[POHandle class]]) {
-        return controller.handle;
-    }
-    return nil;
+    return [controller interactiveViewForWindowPoint:point event:event];
 }
 
 @end

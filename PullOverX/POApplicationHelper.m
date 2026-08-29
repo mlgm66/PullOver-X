@@ -8,6 +8,33 @@
 #import "POApplicationHelper.h"
 #import <objc/message.h>
 
+@interface UIImage (POApplicationIcon)
++ (UIImage *)_applicationIconImageForBundleIdentifier:(NSString *)bundleID
+                                               format:(int)format
+                                                scale:(CGFloat)scale;
+@end
+
+static NSString * const POEnabledPendingRespringKey = @"enabled-respring-pending";
+static NSDictionary *POCachedSettings;
+static NSSet<NSString *> *POExternalURLRoutingWhitelist;
+static BOOL PORuntimeEnabled;
+static BOOL PORuntimeEnabledInitialized;
+
+static UIImage *POIconServicesImageForIdentifier(NSString *identifier) {
+    if (identifier.length == 0 ||
+        ![UIImage respondsToSelector:@selector(_applicationIconImageForBundleIdentifier:format:scale:)]) {
+        return nil;
+    }
+
+    @try {
+        return [UIImage _applicationIconImageForBundleIdentifier:identifier
+                                                          format:0
+                                                           scale:UIScreen.mainScreen.scale];
+    } @catch (__unused NSException *exception) {
+        return nil;
+    }
+}
+
 static id POValueForKeySafely(id object, NSString *key) {
     if (!object || key.length == 0) {
         return nil;
@@ -19,13 +46,61 @@ static id POValueForKeySafely(id object, NSString *key) {
     }
 }
 
+static BOOL POApplicationHasHiddenTag(id application) {
+    SEL infoSelector = NSSelectorFromString(@"info");
+    if (!application || ![application respondsToSelector:infoSelector]) {
+        return NO;
+    }
+
+    id info = ((id (*)(id, SEL))objc_msgSend)(application, infoSelector);
+    SEL hiddenSelector = NSSelectorFromString(@"hasHiddenTag");
+    return [info respondsToSelector:hiddenSelector]
+        ? ((BOOL (*)(id, SEL))objc_msgSend)(info, hiddenSelector)
+        : NO;
+}
+
+static NSDictionary *POInfoDictionaryForBundleIdentifier(NSString *bundleId) {
+    if (bundleId.length == 0) {
+        return nil;
+    }
+    Class proxyClass = NSClassFromString(@"LSApplicationProxy");
+    SEL proxySelector = NSSelectorFromString(@"bundleProxyForIdentifier:");
+    if (!proxyClass || ![proxyClass respondsToSelector:proxySelector]) {
+        return nil;
+    }
+    id proxy = ((id (*)(id, SEL, id))objc_msgSend)(proxyClass, proxySelector, bundleId);
+    NSURL *bundleURL = POValueForKeySafely(proxy, @"bundleURL");
+    if (![bundleURL isKindOfClass:[NSURL class]]) {
+        return nil;
+    }
+    return [NSBundle bundleWithURL:bundleURL].infoDictionary;
+}
+
+static UIInterfaceOrientationMask POOrientationMaskFromStrings(NSArray *orientations) {
+    UIInterfaceOrientationMask mask = 0;
+    for (id value in orientations) {
+        if (![value isKindOfClass:[NSString class]]) {
+            continue;
+        }
+        if ([value isEqualToString:@"UIInterfaceOrientationPortrait"]) {
+            mask |= UIInterfaceOrientationMaskPortrait;
+        } else if ([value isEqualToString:@"UIInterfaceOrientationPortraitUpsideDown"]) {
+            mask |= UIInterfaceOrientationMaskPortraitUpsideDown;
+        } else if ([value isEqualToString:@"UIInterfaceOrientationLandscapeLeft"]) {
+            mask |= UIInterfaceOrientationMaskLandscapeLeft;
+        } else if ([value isEqualToString:@"UIInterfaceOrientationLandscapeRight"]) {
+            mask |= UIInterfaceOrientationMaskLandscapeRight;
+        }
+    }
+    return mask;
+}
+
 static void POCollectRecentBundleIdentifiers(id object, NSMutableOrderedSet *bundleIds, NSInteger depth) {
     if (!object || depth > 4 || bundleIds.count >= 30) {
         return;
     }
 
     if ([object isKindOfClass:[NSString class]]) {
-        // 仅保留真实应用标识符，同时过滤 "main"、"home" 等布局标识。
         if ([(NSString *)object containsString:@"."]) {
             [bundleIds addObject:object];
         }
@@ -42,8 +117,6 @@ static void POCollectRecentBundleIdentifiers(id object, NSMutableOrderedSet *bun
         return;
     }
 
-    // iOS 13 至 16 的属性名多次变化；这里只做只读 KVC 探测，
-    // 仅当 SpringBoard 暴露对应属性时才读取。
     for (NSString *key in @[@"bundleIdentifier", @"displayIdentifier", @"applicationBundleIdentifier", @"applicationIdentifier", @"identifier", @"allItems", @"items", @"displayItems", @"application", @"app"]) {
         id value = POValueForKeySafely(object, key);
         if (value && value != object) {
@@ -64,7 +137,20 @@ static id POSharedObjectForClass(Class cls) {
 
 @implementation POApplicationHelper
 
-+(NSArray *)recentAppsWithCount:(int)count{
++ (void)updateExternalURLRoutingCacheWithSettings:(NSDictionary *)settings {
+    id rawWhitelist = settings[@"externalURLRoutingWhitelist"];
+    NSMutableSet<NSString *> *whitelist = [NSMutableSet set];
+    if ([rawWhitelist isKindOfClass:[NSArray class]]) {
+        for (id value in (NSArray *)rawWhitelist) {
+            if ([value isKindOfClass:[NSString class]] && [(NSString *)value length] > 0) {
+                [whitelist addObject:value];
+            }
+        }
+    }
+    POExternalURLRoutingWhitelist = [whitelist copy];
+}
+
++(NSArray<NSString *> *)recentAppsWithCount:(int)count{
     if (count <= 0) {
         return @[];
     }
@@ -86,7 +172,6 @@ static id POSharedObjectForClass(Class cls) {
             POCollectRecentBundleIdentifiers(POValueForKeySafely(source, key), bundleIds, 0);
         }
         if (bundleIds.count == before) {
-            // 部分 iOS 版本直接由协调器暴露布局对象，而不通过具名集合属性。
             POCollectRecentBundleIdentifiers(source, bundleIds, 0);
         }
         if (bundleIds.count >= (NSUInteger)count) {
@@ -99,6 +184,37 @@ static id POSharedObjectForClass(Class cls) {
         recent = [recent subarrayWithRange:NSMakeRange(0, count)];
     }
     return recent;
+}
+
++(NSArray<NSString *> *)quickSwitchBundleIdentifiers{
+    NSDictionary *settings = [self settings];
+    NSArray *sourceBundleIds = nil;
+    NSInteger requestedRecentCount = 0;
+    if ([settings[@"style"] isEqualToString:@"Recent Apps"]) {
+        requestedRecentCount = [settings[@"recentAppsCount"] integerValue];
+        NSInteger fetchCount = requestedRecentCount > 0 ? requestedRecentCount + 1 : 0;
+        sourceBundleIds = fetchCount > 0 ? [self recentAppsWithCount:(int)fetchCount] : @[];
+    } else {
+        sourceBundleIds = [settings[@"favorites"] isKindOfClass:[NSArray class]] ? settings[@"favorites"] : @[];
+    }
+
+    NSString *frontMostBundleId = [self frontMostBundleId];
+    NSMutableOrderedSet<NSString *> *bundleIds = [NSMutableOrderedSet orderedSet];
+    for (id value in sourceBundleIds) {
+        if (![value isKindOfClass:[NSString class]]) {
+            continue;
+        }
+        NSString *bundleId = (NSString *)value;
+        if ([self isUserFacingApplicationBundleId:bundleId] &&
+            ![bundleId isEqualToString:frontMostBundleId]) {
+            [bundleIds addObject:bundleId];
+        }
+    }
+    NSArray<NSString *> *result = bundleIds.array;
+    if (requestedRecentCount > 0 && result.count > (NSUInteger)requestedRecentCount) {
+        result = [result subarrayWithRange:NSMakeRange(0, (NSUInteger)requestedRecentCount)];
+    }
+    return result;
 }
 
 +(UIImage *)imageForBundleId:(NSString *)bundleId{
@@ -117,52 +233,194 @@ static id POSharedObjectForClass(Class cls) {
     return nil;
 }
 
++ (BOOL)isUserFacingApplicationBundleId:(NSString *)bundleId {
+    if (bundleId.length == 0) {
+        return NO;
+    }
+
+    SBApplicationController *controller = [NSClassFromString(@"SBApplicationController") sharedInstance];
+    SBApplication *application = [controller applicationWithBundleIdentifier:bundleId];
+    if (!application) {
+        return NO;
+    }
+
+    return !POApplicationHasHiddenTag(application);
+}
+
++ (UIInterfaceOrientationMask)supportedInterfaceOrientationsForBundleId:(NSString *)bundleId {
+    if (bundleId.length == 0) {
+        return UIInterfaceOrientationMaskPortrait;
+    }
+    static NSCache<NSString *, NSNumber *> *cache;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cache = [[NSCache alloc] init];
+        cache.countLimit = 64;
+    });
+    NSNumber *cached = [cache objectForKey:bundleId];
+    if (cached) {
+        return (UIInterfaceOrientationMask)cached.unsignedIntegerValue;
+    }
+
+    NSDictionary *info = POInfoDictionaryForBundleIdentifier(bundleId);
+    if (!info) {
+        return UIInterfaceOrientationMaskPortrait;
+    }
+    NSString *idiomKey = UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad
+        ? @"UISupportedInterfaceOrientations~ipad"
+        : @"UISupportedInterfaceOrientations~iphone";
+    NSArray *orientations = [info[idiomKey] isKindOfClass:[NSArray class]] ? info[idiomKey] : nil;
+    if (orientations.count == 0) {
+        orientations = [info[@"UISupportedInterfaceOrientations"] isKindOfClass:[NSArray class]]
+            ? info[@"UISupportedInterfaceOrientations"]
+            : nil;
+    }
+    UIInterfaceOrientationMask mask = POOrientationMaskFromStrings(orientations);
+    if (mask == 0) {
+        mask = UIInterfaceOrientationMaskPortrait;
+    }
+    [cache setObject:@(mask) forKey:bundleId];
+    return mask;
+}
+
++ (UIInterfaceOrientation)preferredHostedInterfaceOrientationForBundleId:(NSString *)bundleId {
+    UIInterfaceOrientationMask mask = [self supportedInterfaceOrientationsForBundleId:bundleId];
+    if (mask & UIInterfaceOrientationMaskPortrait) {
+        return UIInterfaceOrientationPortrait;
+    }
+    if (mask & UIInterfaceOrientationMaskPortraitUpsideDown) {
+        return UIInterfaceOrientationPortraitUpsideDown;
+    }
+    if (mask & UIInterfaceOrientationMaskLandscapeRight) {
+        return UIInterfaceOrientationLandscapeRight;
+    }
+    if (mask & UIInterfaceOrientationMaskLandscapeLeft) {
+        return UIInterfaceOrientationLandscapeLeft;
+    }
+    return UIInterfaceOrientationPortrait;
+}
+
 
 +(NSUserDefaults *)settingsDefaults{
-    // 用 cfprefsd 域（纯标识符，由系统定位物理位置），tweak 与设置 App 读写同一域。
-    // 不写死任何路径 -> rootful/rootless/roothide 三方案通用，roothide 随机 jbroot 也由 cfprefsd 处理。
-    return [[NSUserDefaults alloc] initWithSuiteName:@"com.mlgm.pulloverx"];
+    static NSUserDefaults *defaults;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.mlgm.pulloverx"];
+        [defaults registerDefaults:@{
+            @"enabled": @YES,
+            @"favorites": @[],
+            @"recentAppsCount": @5,
+            @"style": @"Recent Apps",
+            @"leftHanded": @NO,
+            @"hideOnScreenshot": @YES,
+            @"hideLabels": @NO,
+            @"handleSize": @34,
+            @"nubHiddenPercentage": @67,
+            @"landscapeBehavior": @"rotate",
+            @"externalURLRoutingEnabled": @NO,
+            @"externalURLRoutingWhitelist": @[],
+            @"hapticFeedback": @YES,
+            @"soundFeedback": @YES,
+            @"keyboardAvoiding": @YES,
+            @"landscapeKeyboardZoom": @YES,
+            @"autoNub": @NO,
+            @"autoNub-time": @0,
+            POEnabledPendingRespringKey: @NO,
+        }];
+    });
+    return defaults;
 }
-+(NSMutableDictionary *)settings{
-    return [[[self settingsDefaults] dictionaryRepresentation] mutableCopy];
-}
-+(void)setSetting:(id)value forKey:(NSString *)key{
-    if (key.length == 0) {
-        return;
++(NSDictionary<NSString *, id> *)settings{
+    @synchronized (self) {
+        if (!POCachedSettings) {
+            NSDictionary *snapshot = [[self settingsDefaults] dictionaryRepresentation];
+            PORuntimeEnabled = [snapshot[@"enabled"] boolValue];
+            PORuntimeEnabledInitialized = YES;
+            POCachedSettings = [snapshot copy];
+            [self updateExternalURLRoutingCacheWithSettings:POCachedSettings];
+        }
+        return POCachedSettings;
     }
-    NSUserDefaults *defaults = [self settingsDefaults];
-    if (value) {
-        [defaults setObject:value forKey:key];
-    } else {
-        [defaults removeObjectForKey:key];
+}
++ (void)reloadSettings {
+    @synchronized (self) {
+        NSDictionary *snapshot = [[self settingsDefaults] dictionaryRepresentation];
+        BOOL pendingRespring = [snapshot[POEnabledPendingRespringKey] boolValue];
+        if (!PORuntimeEnabledInitialized) {
+            PORuntimeEnabled = [snapshot[@"enabled"] boolValue];
+            PORuntimeEnabledInitialized = YES;
+        } else if (!pendingRespring) {
+            PORuntimeEnabled = [snapshot[@"enabled"] boolValue];
+        }
+
+        NSMutableDictionary *effectiveSettings = [snapshot mutableCopy];
+        effectiveSettings[@"enabled"] = @(PORuntimeEnabled);
+        POCachedSettings = [effectiveSettings copy];
+        [self updateExternalURLRoutingCacheWithSettings:POCachedSettings];
     }
-    [defaults synchronize];
+}
++ (BOOL)isEnabled {
+    return [[self settings][@"enabled"] boolValue];
 }
 
-+(NSMutableDictionary *)authorization{
-    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.mlgm.pulloverxAuthorization"];
-    return [[defaults dictionaryRepresentation] mutableCopy];
++ (BOOL)isExternalURLRoutingEnabled {
+    return [[self settings][@"externalURLRoutingEnabled"] boolValue];
 }
 
++ (BOOL)isExternalURLRoutingTargetBundleId:(NSString *)bundleId {
+    if (bundleId.length == 0 || ![self isExternalURLRoutingEnabled]) {
+        return NO;
+    }
+    @synchronized (self) {
+        return [POExternalURLRoutingWhitelist containsObject:bundleId];
+    }
+}
 
-
-
-//13 icon gen
 + (UIImage *)iconImageForIdentifier:(NSString *)identifier {
-    
-    SBIconController *iconController = [NSClassFromString(@"SBIconController") sharedInstance];
-    SBIcon *icon = [iconController.model expectedIconForDisplayIdentifier:identifier];
-    
-    struct CGSize imageSize;
-    imageSize.height = 60;
-    imageSize.width = 60;
-    
-    struct SBIconImageInfo imageInfo;
-    imageInfo.size  = imageSize;
-    imageInfo.scale = [UIScreen mainScreen].scale;
-    imageInfo.continuousCornerRadius = 12;
-    
-    return [icon generateIconImageWithInfo:imageInfo];
+    if (identifier.length == 0) {
+        return nil;
+    }
+
+    if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26) {
+        UIImage *iconServicesImage = POIconServicesImageForIdentifier(identifier);
+        if (iconServicesImage) {
+            return iconServicesImage;
+        }
+    }
+
+    Class iconControllerClass = NSClassFromString(@"SBIconController");
+    if (!iconControllerClass || ![iconControllerClass respondsToSelector:@selector(sharedInstance)]) {
+        return POIconServicesImageForIdentifier(identifier);
+    }
+
+    SBIconController *iconController = [iconControllerClass sharedInstance];
+    if (!iconController) {
+        return POIconServicesImageForIdentifier(identifier);
+    }
+
+    SBIconModel *iconModel = nil;
+    if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26) {
+        if (![iconController respondsToSelector:@selector(iconModel)]) {
+            return POIconServicesImageForIdentifier(identifier);
+        }
+        iconModel = iconController.iconModel;
+    } else {
+        if (![iconController respondsToSelector:@selector(model)]) {
+            return POIconServicesImageForIdentifier(identifier);
+        }
+        iconModel = iconController.model;
+    }
+    if (!iconModel || ![iconModel respondsToSelector:@selector(applicationIconForBundleIdentifier:)]) {
+        return POIconServicesImageForIdentifier(identifier);
+    }
+
+    SBIcon *icon = [iconModel applicationIconForBundleIdentifier:identifier];
+    SBHIconImageCache *cache = iconController.tableUIIconImageCache;
+    if (!icon || !cache || ![cache respondsToSelector:@selector(imageForIcon:)]) {
+        return POIconServicesImageForIdentifier(identifier);
+    }
+    UIImage *cachedImage = [cache imageForIcon:icon];
+    return cachedImage ?: POIconServicesImageForIdentifier(identifier);
 }
 
 

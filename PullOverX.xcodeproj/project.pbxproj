@@ -14,7 +14,6 @@
 		C71516AC225BC6500021ADB8 /* PullOverViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = C71516AA225BC6500021ADB8 /* PullOverViewController.m */; };
 		C71516B1225BC7800021ADB8 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C71516B0225BC7800021ADB8 /* UIKit.framework */; };
 		C71516B7225BDD6A0021ADB8 /* QuickSwitchTableView.m in Sources */ = {isa = PBXBuildFile; fileRef = C71516B5225BDD6A0021ADB8 /* QuickSwitchTableView.m */; };
-		C71516B9225BE35E0021ADB8 /* AudioToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C71516B8225BE35D0021ADB8 /* AudioToolbox.framework */; };
 		C71516BB225BE3A20021ADB8 /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C71516BA225BE3A20021ADB8 /* CoreGraphics.framework */; };
 		C71516BF225BF12C0021ADB8 /* POApplicationHelper.m in Sources */ = {isa = PBXBuildFile; fileRef = C71516BD225BF12C0021ADB8 /* POApplicationHelper.m */; };
 		C71516C7225BFEFD0021ADB8 /* QuickSwitchTableViewCell.m in Sources */ = {isa = PBXBuildFile; fileRef = C71516C5225BFEFD0021ADB8 /* QuickSwitchTableViewCell.m */; };
@@ -28,17 +27,18 @@
 		C774843F2496A7EF00272DB5 /* POTimeStepperTableCell.m in Sources */ = {isa = PBXBuildFile; fileRef = C774843E2496A7EF00272DB5 /* POTimeStepperTableCell.m */; };
 		C77E05E0229B2B5E003A59C9 /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C77E05DF229B2B5E003A59C9 /* QuartzCore.framework */; };
 		C77E05E1229B2B62003A59C9 /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C77E05DF229B2B5E003A59C9 /* QuartzCore.framework */; };
-		C7CE0D42242A9EE700564335 /* libMobileGestalt.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = C7CE0D41242A9EE600564335 /* libMobileGestalt.tbd */; };
 		C7E559C7238B5FA500B70489 /* ContextHostManager.mm in Sources */ = {isa = PBXBuildFile; fileRef = C71516C9225C1AA10021ADB8 /* ContextHostManager.mm */; };
 		C900000000000000000001 /* POLocalization.m in Sources */ = {isa = PBXBuildFile; fileRef = C900000000000000000010 /* POLocalization.m */; };
 		C900000000000000000002 /* POLocalization.m in Sources */ = {isa = PBXBuildFile; fileRef = C900000000000000000010 /* POLocalization.m */; };
 		C900000000000000000100 /* PullOverXPreferences/Package/Library/PreferenceBundles/PullOverXPreferences.bundle/PullOverXPreferences.plist in Resources */ = {isa = PBXBuildFile; fileRef = C900000000000000000020 /* PullOverXPreferences/Package/Library/PreferenceBundles/PullOverXPreferences.bundle/PullOverXPreferences.plist */; };
 		C900000000000000000101 /* PullOverXPreferences.strings in Resources */ = {isa = PBXBuildFile; fileRef = C900000000000000000030 /* PullOverXPreferences.strings */; };
 		C900000000000000000102 /* Tweak.strings in Resources */ = {isa = PBXBuildFile; fileRef = C900000000000000000031 /* Tweak.strings */; };
-		DE00000000000000000011 /* L360ConfettiView.m in Sources */ = {isa = PBXBuildFile; fileRef = DE00000000000000000010 /* L360ConfettiView.m */; };
-		DE00000000000000000021 /* L360ConfettiArea.m in Sources */ = {isa = PBXBuildFile; fileRef = DE00000000000000000020 /* L360ConfettiArea.m */; };
-		DE00000000000000000031 /* L360ConfettiObject.m in Sources */ = {isa = PBXBuildFile; fileRef = DE00000000000000000030 /* L360ConfettiObject.m */; };
+		D100000000000000000001 /* POHostSessionController.mm in Sources */ = {isa = PBXBuildFile; fileRef = D100000000000000000011 /* POHostSessionController.mm */; };
 		DE00000000000000000041 /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C71516BA225BE3A20021ADB8 /* CoreGraphics.framework */; };
+		E200000000000000000001 /* QuickSwitchHorizontalBarView.m in Sources */ = {isa = PBXBuildFile; fileRef = E200000000000000000011 /* QuickSwitchHorizontalBarView.m */; };
+		E300000000000000000001 /* POQuickSwitchDragCoordinator.m in Sources */ = {isa = PBXBuildFile; fileRef = E300000000000000000011 /* POQuickSwitchDragCoordinator.m */; };
+		E400000000000000000001 /* POExternalActivationCoordinator.m in Sources */ = {isa = PBXBuildFile; fileRef = E400000000000000000011 /* POExternalActivationCoordinator.m */; };
+		F100000000000000000001 /* POSplitSessionController.m in Sources */ = {isa = PBXBuildFile; fileRef = F100000000000000000011 /* POSplitSessionController.m */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -68,7 +68,6 @@
 		C71516B0225BC7800021ADB8 /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
 		C71516B4225BDD6A0021ADB8 /* QuickSwitchTableView.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = QuickSwitchTableView.h; sourceTree = "<group>"; };
 		C71516B5225BDD6A0021ADB8 /* QuickSwitchTableView.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = QuickSwitchTableView.m; sourceTree = "<group>"; };
-		C71516B8225BE35D0021ADB8 /* AudioToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AudioToolbox.framework; path = System/Library/Frameworks/AudioToolbox.framework; sourceTree = SDKROOT; };
 		C71516BA225BE3A20021ADB8 /* CoreGraphics.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreGraphics.framework; path = System/Library/Frameworks/CoreGraphics.framework; sourceTree = SDKROOT; };
 		C71516BC225BF12C0021ADB8 /* POApplicationHelper.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = POApplicationHelper.h; sourceTree = "<group>"; };
 		C71516BD225BF12C0021ADB8 /* POApplicationHelper.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = POApplicationHelper.m; sourceTree = "<group>"; };
@@ -85,11 +84,9 @@
 		C72445DF225D3743001E1330 /* QSFavoritesPickerController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = QSFavoritesPickerController.h; sourceTree = "<group>"; };
 		C72445E0225D3743001E1330 /* QSFavoritesPickerController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = QSFavoritesPickerController.m; sourceTree = "<group>"; };
 		C72445E3225D480B001E1330 /* POStepperTableCell.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = POStepperTableCell.m; sourceTree = "<group>"; };
-		C72445FD22624437001E1330 /* IPC.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = IPC.h; sourceTree = "<group>"; };
 		C774843E2496A7EF00272DB5 /* POTimeStepperTableCell.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = POTimeStepperTableCell.m; sourceTree = "<group>"; };
 		C77E05DF229B2B5E003A59C9 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
 		C7A168DA23B126B100451FA7 /* ContextInterfaces.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = ContextInterfaces.h; sourceTree = "<group>"; };
-		C7CE0D41242A9EE600564335 /* libMobileGestalt.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libMobileGestalt.tbd; path = usr/lib/libMobileGestalt.tbd; sourceTree = SDKROOT; };
 		C900000000000000000010 /* POLocalization.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = POLocalization.m; sourceTree = "<group>"; };
 		C900000000000000000011 /* POLocalization.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = POLocalization.h; sourceTree = "<group>"; };
 		C900000000000000000012 /* POPPath.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = POPPath.h; sourceTree = "<group>"; };
@@ -98,10 +95,18 @@
 		C900000000000000000022 /* PullOverXPreferences/Package/Library/PreferenceBundles/PullOverXPreferences.bundle/zh-Hans.lproj/PullOverXPreferences.strings */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; path = "PullOverXPreferences/Package/Library/PreferenceBundles/PullOverXPreferences.bundle/zh-Hans.lproj/PullOverXPreferences.strings"; sourceTree = SOURCE_ROOT; };
 		C900000000000000000023 /* PullOverXPreferences/Package/Library/PreferenceBundles/PullOverXPreferences.bundle/en.lproj/Tweak.strings */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; path = PullOverXPreferences/Package/Library/PreferenceBundles/PullOverXPreferences.bundle/en.lproj/Tweak.strings; sourceTree = SOURCE_ROOT; };
 		C900000000000000000024 /* PullOverXPreferences/Package/Library/PreferenceBundles/PullOverXPreferences.bundle/zh-Hans.lproj/Tweak.strings */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; path = "PullOverXPreferences/Package/Library/PreferenceBundles/PullOverXPreferences.bundle/zh-Hans.lproj/Tweak.strings"; sourceTree = SOURCE_ROOT; };
-		DE00000000000000000010 /* L360ConfettiView.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = L360ConfettiView.m; path = ThirdParty/L360Confetti/iOS/L360Confetti/L360ConfettiView.m; sourceTree = SOURCE_ROOT; };
-		DE00000000000000000020 /* L360ConfettiArea.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = L360ConfettiArea.m; path = ThirdParty/L360Confetti/iOS/L360Confetti/L360ConfettiArea.m; sourceTree = SOURCE_ROOT; };
-		DE00000000000000000030 /* L360ConfettiObject.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = L360ConfettiObject.m; path = ThirdParty/L360Confetti/iOS/L360Confetti/L360ConfettiObject.m; sourceTree = SOURCE_ROOT; };
+		D100000000000000000010 /* POHostSessionController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = POHostSessionController.h; sourceTree = "<group>"; };
+		D100000000000000000011 /* POHostSessionController.mm */ = {isa = PBXFileReference; explicitFileType = sourcecode.cpp.objcpp; path = POHostSessionController.mm; sourceTree = "<group>"; };
 		DE000000000000000000C0 /* PullOverX.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = PullOverX.xcconfig; sourceTree = "<group>"; };
+		E200000000000000000010 /* QuickSwitchHorizontalBarView.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = QuickSwitchHorizontalBarView.h; sourceTree = "<group>"; };
+		E200000000000000000011 /* QuickSwitchHorizontalBarView.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = QuickSwitchHorizontalBarView.m; sourceTree = "<group>"; };
+		E300000000000000000010 /* POQuickSwitchDragCoordinator.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = POQuickSwitchDragCoordinator.h; sourceTree = "<group>"; };
+		E300000000000000000011 /* POQuickSwitchDragCoordinator.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = POQuickSwitchDragCoordinator.m; sourceTree = "<group>"; };
+		E400000000000000000010 /* POExternalActivationCoordinator.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = POExternalActivationCoordinator.h; sourceTree = "<group>"; };
+		E400000000000000000011 /* POExternalActivationCoordinator.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = POExternalActivationCoordinator.m; sourceTree = "<group>"; };
+		F100000000000000000010 /* POSplitSessionController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = POSplitSessionController.h; sourceTree = "<group>"; };
+		F100000000000000000011 /* POSplitSessionController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = POSplitSessionController.m; sourceTree = "<group>"; };
+		A100000000000000000010 /* POQuickSwitchMetrics.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = POQuickSwitchMetrics.h; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -109,10 +114,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				C7CE0D42242A9EE700564335 /* libMobileGestalt.tbd in Frameworks */,
 				C77E05E0229B2B5E003A59C9 /* QuartzCore.framework in Frameworks */,
 				C71516BB225BE3A20021ADB8 /* CoreGraphics.framework in Frameworks */,
-				C71516B9225BE35E0021ADB8 /* AudioToolbox.framework in Frameworks */,
 				C71516B1225BC7800021ADB8 /* UIKit.framework in Frameworks */,
 				C715168B225BC4000021ADB8 /* Foundation.framework in Frameworks */,
 			);
@@ -158,10 +161,8 @@
 		C7151689225BC4000021ADB8 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
-				C7CE0D41242A9EE600564335 /* libMobileGestalt.tbd */,
 				C77E05DF229B2B5E003A59C9 /* QuartzCore.framework */,
 				C71516BA225BE3A20021ADB8 /* CoreGraphics.framework */,
-				C71516B8225BE35D0021ADB8 /* AudioToolbox.framework */,
 				C71516B0225BC7800021ADB8 /* UIKit.framework */,
 				C715168A225BC4000021ADB8 /* Foundation.framework */,
 			);
@@ -171,10 +172,13 @@
 		C715168C225BC4000021ADB8 /* PullOverX */ = {
 			isa = PBXGroup;
 			children = (
-				C72445FD22624437001E1330 /* IPC.h */,
 				C7151695225BC4000021ADB8 /* PullOverX.mm */,
 				C71516C8225C1AA10021ADB8 /* ContextHostManager.h */,
 				C71516C9225C1AA10021ADB8 /* ContextHostManager.mm */,
+				D100000000000000000010 /* POHostSessionController.h */,
+				D100000000000000000011 /* POHostSessionController.mm */,
+				E400000000000000000010 /* POExternalActivationCoordinator.h */,
+				E400000000000000000011 /* POExternalActivationCoordinator.m */,
 				C7A168DA23B126B100451FA7 /* ContextInterfaces.h */,
 				C71516A0225BC55F0021ADB8 /* PullOverWindow.h */,
 				C71516A1225BC55F0021ADB8 /* PullOverWindow.m */,
@@ -184,6 +188,13 @@
 				C71516AD225BC6C00021ADB8 /* POHandle.m */,
 				C71516B4225BDD6A0021ADB8 /* QuickSwitchTableView.h */,
 				C71516B5225BDD6A0021ADB8 /* QuickSwitchTableView.m */,
+				E200000000000000000010 /* QuickSwitchHorizontalBarView.h */,
+				E200000000000000000011 /* QuickSwitchHorizontalBarView.m */,
+				E300000000000000000010 /* POQuickSwitchDragCoordinator.h */,
+				E300000000000000000011 /* POQuickSwitchDragCoordinator.m */,
+				A100000000000000000010 /* POQuickSwitchMetrics.h */,
+				F100000000000000000010 /* POSplitSessionController.h */,
+				F100000000000000000011 /* POSplitSessionController.m */,
 				C71516C4225BFEFD0021ADB8 /* QuickSwitchTableViewCell.h */,
 				C71516C5225BFEFD0021ADB8 /* QuickSwitchTableViewCell.m */,
 				C71516A5225BC62B0021ADB8 /* BaseScrollView.h */,
@@ -206,9 +217,6 @@
 				C72445E0225D3743001E1330 /* QSFavoritesPickerController.m */,
 				C72445E3225D480B001E1330 /* POStepperTableCell.m */,
 				C774843E2496A7EF00272DB5 /* POTimeStepperTableCell.m */,
-				DE00000000000000000010 /* L360ConfettiView.m */,
-				DE00000000000000000020 /* L360ConfettiArea.m */,
-				DE00000000000000000030 /* L360ConfettiObject.m */,
 				C71516E4225C676A0021ADB8 /* PullOverXPreferences-Info.plist */,
 				C71516F7225C676A0021ADB8 /* PullOverXPreferences-Prefix.pch */,
 				C900000000000000000020 /* PullOverXPreferences/Package/Library/PreferenceBundles/PullOverXPreferences.bundle/PullOverXPreferences.plist */,
@@ -277,6 +285,7 @@
 			hasScannedForEncodings = 0;
 			knownRegions = (
 				en,
+				Base,
 				"zh-Hans",
 			);
 			mainGroup = C715167C225BC4000021ADB8;
@@ -310,11 +319,16 @@
 			files = (
 				C900000000000000000001 /* POLocalization.m in Sources */,
 				C7E559C7238B5FA500B70489 /* ContextHostManager.mm in Sources */,
+				D100000000000000000001 /* POHostSessionController.mm in Sources */,
+				E400000000000000000001 /* POExternalActivationCoordinator.m in Sources */,
 				C715170B225C72770021ADB8 /* POHandle.m in Sources */,
 				C71516A3225BC55F0021ADB8 /* PullOverWindow.m in Sources */,
 				C71516A8225BC62B0021ADB8 /* BaseScrollView.m in Sources */,
 				C71516BF225BF12C0021ADB8 /* POApplicationHelper.m in Sources */,
 				C71516B7225BDD6A0021ADB8 /* QuickSwitchTableView.m in Sources */,
+				E200000000000000000001 /* QuickSwitchHorizontalBarView.m in Sources */,
+				E300000000000000000001 /* POQuickSwitchDragCoordinator.m in Sources */,
+				F100000000000000000001 /* POSplitSessionController.m in Sources */,
 				C7151696225BC4000021ADB8 /* PullOverX.mm in Sources */,
 				C71516AC225BC6500021ADB8 /* PullOverViewController.m in Sources */,
 				C71516C7225BFEFD0021ADB8 /* QuickSwitchTableViewCell.m in Sources */,
@@ -331,9 +345,6 @@
 				C72445E4225D480B001E1330 /* POStepperTableCell.m in Sources */,
 				C72445E1225D3743001E1330 /* QSFavoritesPickerController.m in Sources */,
 				C7151715225C73440021ADB8 /* POApplicationHelper.m in Sources */,
-				DE00000000000000000011 /* L360ConfettiView.m in Sources */,
-				DE00000000000000000021 /* L360ConfettiArea.m in Sources */,
-				DE00000000000000000031 /* L360ConfettiObject.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -373,12 +384,41 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = DE000000000000000000C0 /* PullOverX.xcconfig */;
 			buildSettings = {
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_MISSING_LOCALIZATIONS = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GCC_OPTIMIZATION_LEVEL = 0;
-				GCC_PREPROCESSOR_DEFINITIONS = (
-					"DEBUG=1",
-					"$(inherited)",
-				);
-				ONLY_ACTIVE_ARCH = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				ONLY_ACTIVE_ARCH = YES;
 			};
 			name = Debug;
 		};
@@ -386,17 +426,49 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = DE000000000000000000C0 /* PullOverX.xcconfig */;
 			buildSettings = {
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_MISSING_LOCALIZATIONS = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
 			};
 			name = Release;
 		};
 		C715169E225BC4000021ADB8 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = DE000000000000000000C0 /* PullOverX.xcconfig */;
 			buildSettings = {
 				ARCHS = "$(ARCHS_STANDARD)";
 				GCC_PREFIX_HEADER = "PullOverX/PullOverX-Prefix.pch";
 				INFOPLIST_FILE = "$(SRCROOT)/PullOverX/Package/Library/MobileSubstrate/DynamicLibraries/PullOverX.plist";
 				INSTALL_PATH = /Library/MobileSubstrate/DynamicLibraries;
+				ONLY_ACTIVE_ARCH = YES;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-ObjC",
@@ -410,7 +482,6 @@
 		};
 		C715169F225BC4000021ADB8 /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = DE000000000000000000C0 /* PullOverX.xcconfig */;
 			buildSettings = {
 				ARCHS = "$(ARCHS_STANDARD)";
 				GCC_PREFIX_HEADER = "PullOverX/PullOverX-Prefix.pch";
@@ -429,7 +500,6 @@
 		};
 		C71516F8225C676A0021ADB8 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = DE000000000000000000C0 /* PullOverX.xcconfig */;
 			buildSettings = {
 				ARCHS = "$(ARCHS_STANDARD)";
 				GCC_PREFIX_HEADER = "PullOverXPreferences/PullOverXPreferences-Prefix.pch";
@@ -438,6 +508,9 @@
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-ObjC",
+					"-framework",
+					"AltList",
+					"-Wl,-needed_framework,AltList",
 					"$(POP_ROOTHIDE_LDFLAGS)",
 					"$(POP_ROOTLESS_LDFLAGS)",
 				);
@@ -449,7 +522,6 @@
 		};
 		C71516F9225C676A0021ADB8 /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = DE000000000000000000C0 /* PullOverX.xcconfig */;
 			buildSettings = {
 				ARCHS = "$(ARCHS_STANDARD)";
 				GCC_PREFIX_HEADER = "PullOverXPreferences/PullOverXPreferences-Prefix.pch";
@@ -458,6 +530,9 @@
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-ObjC",
+					"-framework",
+					"AltList",
+					"-Wl,-needed_framework,AltList",
 					"$(POP_ROOTHIDE_LDFLAGS)",
 					"$(POP_ROOTLESS_LDFLAGS)",
 				);

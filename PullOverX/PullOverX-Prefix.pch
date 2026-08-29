@@ -1,6 +1,4 @@
 //
-// Prefix header for all source files of the 'PullOverX' target in the 'PullOverX' project
-//
 
 #ifdef __OBJC__
     #import <Foundation/Foundation.h>

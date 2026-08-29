@@ -1,12 +1,13 @@
 // PullOverX 共享构建配置。
-// 方案选择（roothide、rootless、rootful）由 build.sh 控制，
-// 它会覆盖 POP_SCHEME、链接选项和 GCC_PREPROCESSOR_DEFINITIONS。
+// 方案选择（roothide、rootless、rootful）由 build.sh 控制，如：./build.sh roothide
 
 THEOS = /opt/theos
 DEVKIT = $(SRCROOT)/roothide-devkit
 
 // 默认方案；build.sh 会通过 xcodebuild 命令行覆盖。
 POP_SCHEME = roothide
+POP_SCHEME_LIBRARY_DIR = $(THEOS)/vendor/lib/iphone/roothide
+POP_ALTLIST_FRAMEWORK_DIR = $(SRCROOT)/PullOverXPreferences/Frameworks/_roothide
 POP_ROOTHIDE_LDFLAGS = -lroothide
 POP_ROOTLESS_LDFLAGS =
 
@@ -15,7 +16,6 @@ TARGETED_DEVICE_FAMILY = 1,2
 IPHONEOS_DEPLOYMENT_TARGET = 14.0
 ARCHS = arm64e
 VALID_ARCHS = arm64 arm64e
-ONLY_ACTIVE_ARCH = NO
 ENABLE_BITCODE = NO
 CLANG_ENABLE_OBJC_ARC = YES
 ALWAYS_SEARCH_USER_PATHS = NO
@@ -24,7 +24,6 @@ VERSIONING_SYSTEM = apple-generic
 DYLIB_COMPATIBILITY_VERSION = 1
 DYLIB_CURRENT_VERSION = 1
 
-// Tweak 与偏好设置包均为注入式库，不需要签名证书。
 CODE_SIGN_IDENTITY =
 CODE_SIGN_IDENTITY[sdk=iphoneos*] =
 CODE_SIGNING_REQUIRED = NO
@@ -34,28 +33,18 @@ DEVELOPMENT_TEAM =
 PROVISIONING_PROFILE_SPECIFIER =
 AD_HOC_CODE_SIGNING_ALLOWED = YES
 
-// 头文件搜索路径：roothide 开发套件、theos 头文件与 L360Confetti。
-HEADER_SEARCH_PATHS = $(inherited) $(DEVKIT) $(THEOS)/vendor/include $(THEOS)/include $(SRCROOT)/ThirdParty/L360Confetti/iOS
+HEADER_SEARCH_PATHS = $(inherited) $(DEVKIT) $(THEOS)/vendor/include $(THEOS)/include
 
-// 链接搜索路径：优先使用当前方案的 theos 库，再回退到通用库和开发套件 tbd。
-FRAMEWORK_SEARCH_PATHS = $(inherited) $(THEOS)/vendor/lib/iphone/$(POP_SCHEME) $(THEOS)/vendor/lib
-LIBRARY_SEARCH_PATHS = $(inherited) $(THEOS)/vendor/lib/iphone/$(POP_SCHEME) $(DEVKIT)/roothide $(THEOS)/vendor/lib
+FRAMEWORK_SEARCH_PATHS = $(inherited) $(POP_SCHEME_LIBRARY_DIR) $(POP_ALTLIST_FRAMEWORK_DIR) $(THEOS)/vendor/lib
+LIBRARY_SEARCH_PATHS = $(inherited) $(POP_SCHEME_LIBRARY_DIR) $(DEVKIT)/roothide $(THEOS)/vendor/lib
 
-// 默认使用 RootHide；其他方案由 build.sh 选择明确的路径实现。
 POP_SCHEME_DEFS = THEOS_PACKAGE_SCHEME_ROOTHIDE=1
 GCC_PREPROCESSOR_DEFINITIONS = $(inherited) $(POP_SCHEME_DEFS)
 
-// 注入代码在运行时解析私有框架符号（SpringBoard、Preferences 等）。
-// roothide 的 libroothide 仅由主 Tweak 链接，它注入 SpringBoard 后可确保 .jbroot 软链接存在；
-// 偏好设置包由“设置”加载，不能依赖该库。
-OTHER_LDFLAGS = $(inherited) -undefined dynamic_lookup
+OTHER_LDFLAGS = $(inherited) -undefined dynamic_lookup -Wl,-w
 
-// 发布构建设置：不生成调试符号，并移除未使用或非全局的符号以减小安装包体积。
-// 注入式 dylib 通过间接符号表解析私有 API，因此保留全局符号并使用 non-global。
 GCC_GENERATE_DEBUGGING_SYMBOLS = NO
 GCC_SYMBOLS_PRIVATE_EXTERN = YES
 DEPLOYMENT_POSTPROCESSING = YES
-STRIP_INSTALLED_PRODUCT = YES
-STRIP_STYLE = non-global
 COPY_PHASE_STRIP = NO
 DEAD_CODE_STRIPPING = YES

@@ -22,7 +22,10 @@
     UILabel *messageLabel;
     UIVisualEffectView *blurView;
     UILongPressGestureRecognizer *quickSwitchLongPress;
+    UIPanGestureRecognizer *_panelPanGestureRecognizer;
 }
+
+-(void)applyCurrentPresentationAnimated:(BOOL)animated;
 
 @end
 
@@ -47,7 +50,6 @@
 }
 
 -(CGFloat)fullCornerRadius{
-    // 与 60pt 图标生成时的 12pt 圆角比例保持更协调的视觉关系。
     return CGRectGetWidth(self.bounds) * (8.0 / PO_HANDLE_DEFAULT_SIZE);
 }
 
@@ -55,14 +57,15 @@
     return CGRectGetWidth(self.bounds) * (6.0 / PO_HANDLE_DEFAULT_SIZE);
 }
 
+-(BOOL)usesNubbedPresentation{
+    return self.layoutMode == POHandleLayoutModeVerticalRail && self.isNubbed;
+}
+
 -(CGFloat)nubbedOriginX{
     CGFloat containerWidth = CGRectGetWidth(self.superview.bounds);
     if (containerWidth <= 0) {
-        // init 阶段尚未加入 50pt 宽的把手轨道，使用其固定宽度作为回退。
         containerWidth = 50.0;
     }
-    // 隐藏比例按整个把手外框计算：隐藏 67% 即仅露出外框宽度的 33%，
-    // 不以内部 App 图标尺寸作为分母。
     CGFloat visibleWidth = CGRectGetWidth(self.bounds) * (1.0 - [self nubHiddenPercentage] / 100.0);
     return containerWidth - visibleWidth;
 }
@@ -86,12 +89,11 @@
                                       iconSize,
                                       iconSize);
     blurView.frame = self.bounds;
-    blurView.layer.cornerRadius = self.isNubbed ? [self nubbedCornerRadius] : [self fullCornerRadius];
+    blurView.layer.cornerRadius = [self usesNubbedPresentation] ? [self nubbedCornerRadius] : [self fullCornerRadius];
 }
 
 -(instancetype)initWithController:(id)hubController{
     if (self = [super initWithFrame:CGRectMake(0, 0, PO_HANDLE_DEFAULT_SIZE, PO_HANDLE_DEFAULT_SIZE)]) {
-        // 把手底色保持透明，通透感完全交给 blur；额外白色填充会让毛玻璃发灰发实。
         self.backgroundColor = [UIColor colorWithWhite:1 alpha:0.04];
         self.layer.cornerRadius = 8;
         [self.layer setShadowColor:[UIColor blackColor].CGColor];
@@ -109,7 +111,13 @@
         quickSwitchLongPress.cancelsTouchesInView = NO;
         [self addGestureRecognizer:quickSwitchLongPress];
         [tap requireGestureRecognizerToFail:quickSwitchLongPress];
-        
+        _panelPanGestureRecognizer = [[UIPanGestureRecognizer alloc] initWithTarget:self
+                                                                            action:@selector(panelPan:)];
+        _panelPanGestureRecognizer.delegate = self;
+        _panelPanGestureRecognizer.maximumNumberOfTouches = 1;
+        [self addGestureRecognizer:_panelPanGestureRecognizer];
+        [_panelPanGestureRecognizer requireGestureRecognizerToFail:quickSwitchLongPress];
+        [tap requireGestureRecognizerToFail:_panelPanGestureRecognizer];
         
         UIBlurEffect *blur = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial];
         blurView = [[UIVisualEffectView alloc] initWithEffect:blur];
@@ -127,6 +135,7 @@
         self.imageView.clipsToBounds = YES;
         self.imageView.tintColor = [UIColor lightGrayColor];
         [self addSubview:self.imageView];
+        self.layoutMode = POHandleLayoutModeVerticalRail;
         [self applyHandleSize];
         
         [self setIsNubbed:[[NSUserDefaults standardUserDefaults] boolForKey:@"isNubbed"]];
@@ -136,18 +145,35 @@
 
 -(void)setIsNubbed:(BOOL)isNubbed{
     _isNubbed = isNubbed;
-    
     [[NSUserDefaults standardUserDefaults] setBool:isNubbed forKey:@"isNubbed"];
-    
-    [UIView animateWithDuration:0.3 animations:^{
-        if (isNubbed) {
+    [self applyCurrentPresentationAnimated:YES];
+}
+
+-(void)setLayoutMode:(POHandleLayoutMode)layoutMode{
+    if (_layoutMode == layoutMode) {
+        return;
+    }
+    _layoutMode = layoutMode;
+    [self applyCurrentPresentationAnimated:NO];
+}
+
+-(void)applyCurrentPresentationAnimated:(BOOL)animated{
+    void (^changes)(void) = ^{
+        if ([self usesNubbedPresentation]) {
             [self applyNubbedPosition];
-            blurView.layer.cornerRadius = [self nubbedCornerRadius];
-        }else{
-            CGRect r = self.frame; r.origin.x = self.restingOriginX; self.frame = r;
-            blurView.layer.cornerRadius = [self fullCornerRadius];
+            self->blurView.layer.cornerRadius = [self nubbedCornerRadius];
+        } else {
+            CGRect frame = self.frame;
+            frame.origin.x = self.restingOriginX;
+            self.frame = frame;
+            self->blurView.layer.cornerRadius = [self fullCornerRadius];
         }
-    }];
+    };
+    if (animated) {
+        [UIView animateWithDuration:0.3 animations:changes];
+    } else {
+        changes();
+    }
 }
 
 -(void)refreshHandleSizeAnimated:(BOOL)animated{
@@ -162,19 +188,7 @@
 }
 
 -(void)refreshNubbedPositionAnimated:(BOOL)animated{
-    if (!self.isNubbed) {
-        return;
-    }
-
-    void (^changes)(void) = ^{
-        [self applyNubbedPosition];
-        blurView.layer.cornerRadius = [self nubbedCornerRadius];
-    };
-    if (animated) {
-        [UIView animateWithDuration:0.2 animations:changes];
-    } else {
-        changes();
-    }
+    [self applyCurrentPresentationAnimated:animated];
 }
 
 -(void)layoutSubviews{
@@ -182,17 +196,19 @@
     blurView.frame = self.bounds;
 }
 
-// 把手外框可在 34–50pt 间调整。收起到边缘时可见部分会随隐藏比例改变，
-// 因此命中区始终独立于外框尺寸，覆盖屏幕
-// 边缘内侧至少 52pt，而不是只在图标四周机械外扩 5pt；这样半露状态仍能轻松
-// 点按或长按，常驻状态也比原来的 44pt 更宽容。
 -(BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event{
+    if (self.layoutMode == POHandleLayoutModeLandscapeFixedBottomLeft) {
+        CGFloat horizontalInset = MAX(5.0, (PO_HANDLE_MINIMUM_TOUCH_SIZE - CGRectGetWidth(self.bounds)) / 2.0);
+        CGFloat verticalInset = MAX(5.0, (PO_HANDLE_MINIMUM_TOUCH_SIZE - CGRectGetHeight(self.bounds)) / 2.0);
+        CGRect hitRect = CGRectInset(self.bounds, -horizontalInset, -verticalInset);
+        return CGRectContainsPoint(hitRect, point);
+    }
+
     CGFloat containerWidth = CGRectGetWidth(self.superview.bounds);
     if (containerWidth <= 0) {
         containerWidth = 50.0;
     }
-    // POHandle 位于右侧 50pt 轨道。向轨道内侧扩展到窗口边缘再多覆盖 2pt，
-    // 可确保系统窗口内的有效横向命中宽度达到 52pt。
+
     CGFloat desiredHitLeftInContainer = containerWidth - PO_HANDLE_MINIMUM_TOUCH_SIZE;
     CGFloat leadingInset = MAX(5.0, CGRectGetMinX(self.frame) - desiredHitLeftInContainer);
     CGFloat verticalInset = MAX(5.0, (PO_HANDLE_MINIMUM_TOUCH_SIZE - CGRectGetHeight(self.bounds)) / 2.0);
@@ -206,14 +222,28 @@
 - (void)didMoveToSuperview {
     [super didMoveToSuperview];
     if ([self.superview isKindOfClass:[UIScrollView class]]) {
-        // 把手位于纵向滚动视图内，长按优先可避免开始选择图标时被滚动手势取消。
-        [((UIScrollView *)self.superview).panGestureRecognizer requireGestureRecognizerToFail:quickSwitchLongPress];
+        UIPanGestureRecognizer *railPan = ((UIScrollView *)self.superview).panGestureRecognizer;
+        [railPan requireGestureRecognizerToFail:quickSwitchLongPress];
+        [railPan requireGestureRecognizerToFail:_panelPanGestureRecognizer];
     }
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
     shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
     return NO;
+}
+
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
+    if (gestureRecognizer == _panelPanGestureRecognizer) {
+        CGPoint velocity = [(UIPanGestureRecognizer *)gestureRecognizer velocityInView:self];
+        CGFloat absX = fabs(velocity.x);
+        CGFloat absY = fabs(velocity.y);
+        if (self.layoutMode == POHandleLayoutModeLandscapeFixedBottomLeft) {
+            return MAX(absX, absY) > 0.0 && fabs(absX - absY) > 0.01;
+        }
+        return absX > absY;
+    }
+    return YES;
 }
 
 
@@ -223,6 +253,10 @@
 
 -(void)longPress:(UIGestureRecognizer *)recognizer{
     [self.delegate handle:self didLongPress:recognizer];
+}
+
+-(void)panelPan:(UIPanGestureRecognizer *)recognizer{
+    [self.delegate handle:self didPanPanel:recognizer];
 }
 
 

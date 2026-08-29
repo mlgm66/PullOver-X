@@ -8,7 +8,6 @@
 #import "QSFavoritesPickerController.h"
 #import "../POLocalization.h"
 
-// 常规（非搜索）模式下的分区结构。
 typedef NS_ENUM(NSInteger, QSSection) {
     QSSectionSelected = 0,
     QSSectionUser     = 1,
@@ -17,7 +16,7 @@ typedef NS_ENUM(NSInteger, QSSection) {
 };
 
 @interface LSApplicationRecord : NSObject
-@property (nonatomic, readonly) NSArray *appTags; // 'hidden'
+@property (nonatomic, readonly) NSArray *appTags;
 @property (getter=isLaunchProhibited, readonly) BOOL launchProhibited;
 @end
 
@@ -40,7 +39,6 @@ typedef NS_ENUM(NSInteger, QSSection) {
 + (UIImage *)_applicationIconImageForBundleIdentifier:(NSString *)bundleID format:(int)format scale:(CGFloat)scale;
 @end
 
-// " hidden "（含空格）同样有效，因此采用子串匹配而非完全相等，与 AltList 行为一致。
 static BOOL POTagArrayContainsHidden(NSArray *tags) {
     if (![tags isKindOfClass:[NSArray class]]) {
         return NO;
@@ -54,34 +52,42 @@ static BOOL POTagArrayContainsHidden(NSArray *tags) {
     return NO;
 }
 
-// 判断应用是否从主屏幕隐藏，复刻 AltList 的判断；iOS 14 起 proxy.appTags 为空，
-// 实际标签位于 correspondingApplicationRecord。
 static BOOL POApplicationProxyIsHidden(LSApplicationProxy *proxy) {
     NSArray *appTags = nil;
     NSArray *recordAppTags = nil;
     NSArray *sbAppTags = nil;
     BOOL launchProhibited = NO;
 
-    if ([proxy respondsToSelector:@selector(correspondingApplicationRecord)]) {
-        LSApplicationRecord *record = [proxy correspondingApplicationRecord];
-        recordAppTags = record.appTags;
-        launchProhibited = record.launchProhibited;
-    }
-    if ([proxy respondsToSelector:@selector(appTags)]) {
-        appTags = proxy.appTags;
-    }
-    if (!launchProhibited && [proxy respondsToSelector:@selector(isLaunchProhibited)]) {
-        launchProhibited = proxy.launchProhibited;
+    @try {
+        if ([proxy respondsToSelector:@selector(correspondingApplicationRecord)]) {
+            id record = [proxy correspondingApplicationRecord];
+            if ([record respondsToSelector:@selector(appTags)]) {
+                recordAppTags = [record appTags];
+            }
+            if ([record respondsToSelector:@selector(isLaunchProhibited)]) {
+                launchProhibited = [record isLaunchProhibited];
+            }
+        }
+        if ([proxy respondsToSelector:@selector(appTags)]) {
+            appTags = [proxy appTags];
+        }
+        if (!launchProhibited && [proxy respondsToSelector:@selector(isLaunchProhibited)]) {
+            launchProhibited = [proxy isLaunchProhibited];
+        }
+
+        NSURL *bundleURL = [proxy respondsToSelector:@selector(bundleURL)] ? proxy.bundleURL : nil;
+        if (bundleURL && [bundleURL checkResourceIsReachableAndReturnError:nil]) {
+            NSBundle *bundle = [NSBundle bundleWithURL:bundleURL];
+            sbAppTags = [bundle objectForInfoDictionaryKey:@"SBAppTags"];
+        }
+    } @catch (NSException *exception) {
+        (void)exception;
     }
 
-    NSURL *bundleURL = proxy.bundleURL;
-    if (bundleURL && [bundleURL checkResourceIsReachableAndReturnError:nil]) {
-        NSBundle *bundle = [NSBundle bundleWithURL:bundleURL];
-        sbAppTags = [bundle objectForInfoDictionaryKey:@"SBAppTags"];
-    }
-
-    BOOL isWebApplication =
-        ([proxy.applicationIdentifier rangeOfString:@"com.apple.webapp" options:NSCaseInsensitiveSearch].location != NSNotFound);
+    NSString *identifier = [proxy respondsToSelector:@selector(applicationIdentifier)]
+        ? proxy.applicationIdentifier : nil;
+    BOOL isWebApplication = [identifier rangeOfString:@"com.apple.webapp"
+                                               options:NSCaseInsensitiveSearch].location != NSNotFound;
 
     return POTagArrayContainsHidden(appTags)
         || POTagArrayContainsHidden(recordAppTags)
@@ -90,15 +96,18 @@ static BOOL POApplicationProxyIsHidden(LSApplicationProxy *proxy) {
         || launchProhibited;
 }
 
-@interface QSFavoritesPickerController () <UISearchResultsUpdating, UISearchControllerDelegate> {
-    NSMutableDictionary *settings;
-
+@interface QSFavoritesPickerController () <UITableViewDelegate, UITableViewDataSource, UISearchResultsUpdating, UISearchControllerDelegate> {
+    UITableView *favoritesTableView;
     NSMutableDictionary<NSString *, NSString *> *appNamesByIdentifier;
-    NSMutableDictionary<NSString *, NSNumber *> *appTypeByIdentifier; // QSSectionUser / QSSectionSystem
+    NSMutableDictionary<NSString *, NSNumber *> *appTypeByIdentifier;
 
-    NSMutableArray<NSString *> *enabledApps;  // ordered favorites
-    NSMutableArray<NSString *> *userApps;      // unselected user apps
-    NSMutableArray<NSString *> *systemApps;    // unselected system apps
+    NSMutableArray<NSString *> *enabledApps;
+    NSMutableArray<NSString *> *userApps;
+    NSMutableArray<NSString *> *systemApps;
+    NSMutableArray<NSString *> *allApps;
+    NSUInteger installedAppsLoadGeneration;
+    UIActivityIndicatorView *loadingIndicator;
+    BOOL isLoadingInstalledApps;
 
     UISearchController *searchController;
     NSMutableArray<NSString *> *searchResults;
@@ -107,32 +116,44 @@ static BOOL POApplicationProxyIsHidden(LSApplicationProxy *proxy) {
 
 @end
 
+static void POSortIdentifiersByName(NSMutableArray<NSString *> *identifiers,
+                                    NSDictionary<NSString *, NSString *> *names);
+
 @implementation QSFavoritesPickerController
-@synthesize allApps;
 
 -(instancetype)init{
-    self = [super initWithStyle:UITableViewStyleInsetGrouped];
-    return self;
+    return [super init];
 }
--(instancetype)initWithStyle:(UITableViewStyle)style{
-    self = [super initWithStyle:UITableViewStyleInsetGrouped];
-    return self;
-}
--(instancetype)initWithCoder:(NSCoder *)aDecoder{
-    self = [super initWithStyle:UITableViewStyleInsetGrouped];
-    return self;
+
+-(void)loadView{
+    UITableView *tableView = [[UITableView alloc] initWithFrame:CGRectZero
+                                                           style:UITableViewStyleInsetGrouped];
+    tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    favoritesTableView = tableView;
+    tableView.delegate = self;
+
+    UIView *loadingView = [[UIView alloc] initWithFrame:CGRectZero];
+    UIActivityIndicatorView *indicator = [[UIActivityIndicatorView alloc]
+        initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+    indicator.translatesAutoresizingMaskIntoConstraints = NO;
+    indicator.color = [UIColor secondaryLabelColor];
+    [loadingView addSubview:indicator];
+    [NSLayoutConstraint activateConstraints:@[
+        [indicator.centerXAnchor constraintEqualToAnchor:loadingView.centerXAnchor],
+        [indicator.centerYAnchor constraintEqualToAnchor:loadingView.centerYAnchor]
+    ]];
+    loadingIndicator = indicator;
+    isLoadingInstalledApps = YES;
+    tableView.backgroundView = loadingView;
+    tableView.dataSource = self;
+    self.view = tableView;
 }
 
 -(void)viewDidLoad{
-    [super viewDidLoad];
-
     self.title = POLocalizedString(@"QuickSwitch Favorites", @"PullOverXPreferences");
 
-    self.tableView.delegate = self;
-    self.tableView.dataSource = self;
-    self.tableView.allowsSelectionDuringEditing = YES;
-    // 常规模式始终处于编辑状态，使“已选择”分区的排序拖拽把手一直可见。
-    [self.tableView setEditing:YES animated:NO];
+    favoritesTableView.allowsSelectionDuringEditing = YES;
+    [favoritesTableView setEditing:YES animated:NO];
 
     appNamesByIdentifier = [NSMutableDictionary dictionary];
     appTypeByIdentifier = [NSMutableDictionary dictionary];
@@ -141,59 +162,93 @@ static BOOL POApplicationProxyIsHidden(LSApplicationProxy *proxy) {
     systemApps = [NSMutableArray array];
     searchResults = [NSMutableArray array];
     allApps = [NSMutableArray array];
-
-    [self loadInstalledApps];
-    [self loadSavedFavorites];
+    [loadingIndicator startAnimating];
 
     [self setupSearchController];
+    [self startLoadingInstalledApps];
 }
 
 #pragma mark - Data loading
 
--(void)loadInstalledApps{
-    NSMutableArray<NSString *> *loadedUser = [NSMutableArray array];
-    NSMutableArray<NSString *> *loadedSystem = [NSMutableArray array];
+-(void)startLoadingInstalledApps{
+    NSUInteger generation = ++installedAppsLoadGeneration;
 
-    NSArray *installedApps = [[LSApplicationWorkspace defaultWorkspace] allApplications];
-    for (LSApplicationProxy *proxy in installedApps) {
-        NSString *identifier = proxy.applicationIdentifier;
-        if (identifier.length == 0) {
-            continue;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSMutableDictionary<NSString *, NSString *> *loadedNames = [NSMutableDictionary dictionary];
+        NSMutableDictionary<NSString *, NSNumber *> *loadedTypes = [NSMutableDictionary dictionary];
+        NSMutableArray<NSString *> *loadedUser = [NSMutableArray array];
+        NSMutableArray<NSString *> *loadedSystem = [NSMutableArray array];
+
+        @try {
+            Class workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
+            BOOL hasWorkspace = [workspaceClass respondsToSelector:@selector(defaultWorkspace)];
+            id workspace = hasWorkspace ? [workspaceClass defaultWorkspace] : nil;
+            BOOL hasAllApplications = [workspace respondsToSelector:@selector(allApplications)];
+
+            NSArray *installedApps = hasAllApplications ? [workspace allApplications] : nil;
+
+            for (LSApplicationProxy *proxy in installedApps) {
+                @try {
+                    NSString *identifier = [proxy respondsToSelector:@selector(applicationIdentifier)]
+                        ? proxy.applicationIdentifier : nil;
+                    NSString *type = [proxy respondsToSelector:@selector(applicationType)]
+                        ? proxy.applicationType : nil;
+                    NSString *name = [proxy respondsToSelector:@selector(localizedName)]
+                        ? proxy.localizedName : nil;
+                    if (identifier.length == 0) {
+                        continue;
+                    }
+                    BOOL isUser = [type isEqualToString:@"User"];
+                    BOOL isSystem = [type isEqualToString:@"System"];
+                    if (!isUser && !isSystem) {
+                        continue;
+                    }
+                    if (POApplicationProxyIsHidden(proxy)) {
+                        continue;
+                    }
+
+                    loadedNames[identifier] = name ?: identifier;
+                    loadedTypes[identifier] = isUser ? @(QSSectionUser) : @(QSSectionSystem);
+                    [(isUser ? loadedUser : loadedSystem) addObject:identifier];
+                } @catch (NSException *exception) {
+                    (void)exception;
+                }
+            }
+
+            POSortIdentifiersByName(loadedUser, loadedNames);
+            POSortIdentifiersByName(loadedSystem, loadedNames);
+        } @catch (NSException *exception) {
+            (void)exception;
         }
 
-        // 仅显示真正出现在主屏幕的应用，过滤隐藏系统工具和 App 扩展，行为与 AltList 一致。
-        NSString *type = proxy.applicationType;
-        BOOL isUser = [type isEqualToString:@"User"];
-        BOOL isSystem = [type isEqualToString:@"System"];
-        if (!isUser && !isSystem) {
-            continue;
-        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (generation != self->installedAppsLoadGeneration) {
+                return;
+            }
 
-        if (POApplicationProxyIsHidden(proxy)) {
-            continue;
-        }
+            self->appNamesByIdentifier = loadedNames;
+            self->appTypeByIdentifier = loadedTypes;
+            self->userApps = loadedUser;
+            self->systemApps = loadedSystem;
+            self->allApps = [NSMutableArray arrayWithArray:loadedUser];
+            [self->allApps addObjectsFromArray:loadedSystem];
+            [self loadSavedFavorites];
+            self->isLoadingInstalledApps = NO;
+            [self->favoritesTableView reloadData];
+            [self->loadingIndicator stopAnimating];
+            self->favoritesTableView.backgroundView = nil;
+            self->loadingIndicator = nil;
+        });
+    });
+}
 
-        NSString *name = proxy.localizedName ?: identifier;
-        appNamesByIdentifier[identifier] = name;
-
-        if (isUser) {
-            appTypeByIdentifier[identifier] = @(QSSectionUser);
-            [loadedUser addObject:identifier];
-        } else {
-            appTypeByIdentifier[identifier] = @(QSSectionSystem);
-            [loadedSystem addObject:identifier];
-        }
-    }
-
-    [self sortIdentifiersByName:loadedUser];
-    [self sortIdentifiersByName:loadedSystem];
-
-    userApps = loadedUser;
-    systemApps = loadedSystem;
-
-    NSMutableArray *combined = [NSMutableArray arrayWithArray:loadedUser];
-    [combined addObjectsFromArray:loadedSystem];
-    allApps = combined;
+static void POSortIdentifiersByName(NSMutableArray<NSString *> *identifiers,
+                                    NSDictionary<NSString *, NSString *> *names) {
+    [identifiers sortUsingComparator:^NSComparisonResult(NSString *id1, NSString *id2){
+        NSString *n1 = names[id1] ?: id1;
+        NSString *n2 = names[id2] ?: id2;
+        return [n1 localizedCaseInsensitiveCompare:n2];
+    }];
 }
 
 -(void)loadSavedFavorites{
@@ -204,7 +259,10 @@ static BOOL POApplicationProxyIsHidden(LSApplicationProxy *proxy) {
             continue;
         }
         if (appTypeByIdentifier[identifier] == nil) {
-            continue; // app no longer installed / not a valid home-screen app
+            continue;
+        }
+        if ([enabledApps containsObject:identifier]) {
+            continue;
         }
         [enabledApps addObject:identifier];
         [userApps removeObject:identifier];
@@ -213,17 +271,18 @@ static BOOL POApplicationProxyIsHidden(LSApplicationProxy *proxy) {
 }
 
 -(void)sortIdentifiersByName:(NSMutableArray<NSString *> *)identifiers{
-    [identifiers sortUsingComparator:^NSComparisonResult(NSString *id1, NSString *id2){
-        NSString *n1 = appNamesByIdentifier[id1] ?: id1;
-        NSString *n2 = appNamesByIdentifier[id2] ?: id2;
-        return [n1 localizedCaseInsensitiveCompare:n2];
-    }];
+    POSortIdentifiersByName(identifiers, appNamesByIdentifier);
 }
 
 -(void)persistFavorites{
     NSUserDefaults *defaults = [self settingsDefaults];
     [defaults setObject:enabledApps forKey:@"favorites"];
     [defaults synchronize];
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.mlgm.pulloverx.settings-changed"),
+                                         NULL,
+                                         NULL,
+                                         true);
 }
 
 #pragma mark - Search
@@ -246,15 +305,14 @@ static BOOL POApplicationProxyIsHidden(LSApplicationProxy *proxy) {
     BOOL nowSearching = (query.length > 0);
     if (nowSearching != isSearching) {
         isSearching = nowSearching;
-        // 仅常规三分区布局支持排序。
-        [self.tableView setEditing:!isSearching animated:NO];
+        [favoritesTableView setEditing:!isSearching animated:NO];
     }
 
     [searchResults removeAllObjects];
     if (isSearching) {
         for (NSString *identifier in allApps) {
             if ([enabledApps containsObject:identifier]) {
-                continue; // only show apps not yet selected
+                continue;
             }
             NSString *name = appNamesByIdentifier[identifier] ?: identifier;
             if ([name rangeOfString:query options:NSCaseInsensitiveSearch].location != NSNotFound ||
@@ -264,7 +322,7 @@ static BOOL POApplicationProxyIsHidden(LSApplicationProxy *proxy) {
         }
     }
 
-    [self.tableView reloadData];
+    [favoritesTableView reloadData];
 }
 
 #pragma mark - Helpers
@@ -289,10 +347,16 @@ static BOOL POApplicationProxyIsHidden(LSApplicationProxy *proxy) {
 #pragma mark - Table view data source
 
 -(NSInteger)numberOfSectionsInTableView:(UITableView *)tableView{
+    if (isLoadingInstalledApps) {
+        return 0;
+    }
     return isSearching ? 1 : QSSectionCount;
 }
 
 -(NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section{
+    if (isLoadingInstalledApps) {
+        return 0;
+    }
     if (isSearching) {
         return searchResults.count;
     }
@@ -300,12 +364,11 @@ static BOOL POApplicationProxyIsHidden(LSApplicationProxy *proxy) {
 }
 
 -(NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section{
-    if (isSearching) {
+    if (isLoadingInstalledApps || isSearching) {
         return nil;
     }
     switch (section) {
         case QSSectionSelected:
-            // 尚未选择应用时显示点按提示。
             return (enabledApps.count == 0)
                 ? POLocalizedString(@"Tap an app below to select", @"PullOverXPreferences")
                 : POLocalizedString(@"Selected Apps", @"PullOverXPreferences");
@@ -358,31 +421,28 @@ static BOOL POApplicationProxyIsHidden(LSApplicationProxy *proxy) {
     }
 
     if (isSearching) {
-        // 从搜索结果选择后移入收藏。
         [searchResults removeObject:identifier];
         [userApps removeObject:identifier];
         [systemApps removeObject:identifier];
         [enabledApps addObject:identifier];
         [self persistFavorites];
-        [self.tableView reloadData];
+        [favoritesTableView reloadData];
         return;
     }
 
     if (indexPath.section == QSSectionSelected) {
-        // 取消选择后回到原用户或系统分区，并保持排序。
         [enabledApps removeObject:identifier];
         QSSection origin = (QSSection)[appTypeByIdentifier[identifier] integerValue];
         NSMutableArray<NSString *> *pool = (origin == QSSectionSystem) ? systemApps : userApps;
         [pool addObject:identifier];
         [self sortIdentifiersByName:pool];
     } else {
-        // 选择后追加到收藏列表。
         [[self arrayForSection:indexPath.section] removeObject:identifier];
         [enabledApps addObject:identifier];
     }
 
     [self persistFavorites];
-    [self.tableView reloadData];
+    [favoritesTableView reloadData];
 }
 
 #pragma mark - Reordering (drag handles on the Selected section)
@@ -392,7 +452,6 @@ static BOOL POApplicationProxyIsHidden(LSApplicationProxy *proxy) {
 }
 
 -(NSIndexPath *)tableView:(UITableView *)tableView targetIndexPathForMoveFromRowAtIndexPath:(NSIndexPath *)sourceIndexPath toProposedIndexPath:(NSIndexPath *)proposedDestinationIndexPath{
-    // 排序仅允许在“已选择”分区内进行。
     if (proposedDestinationIndexPath.section != QSSectionSelected) {
         return [NSIndexPath indexPathForRow:enabledApps.count - 1 inSection:QSSectionSelected];
     }
@@ -419,7 +478,6 @@ static BOOL POApplicationProxyIsHidden(LSApplicationProxy *proxy) {
 
 #pragma mark - Persistence helper
 
-// 用 cfprefsd 域（纯标识符，与 tweak、主设置页同一 suite），三方案通用不写死路径。
 - (NSUserDefaults *)settingsDefaults{
     return [[NSUserDefaults alloc] initWithSuiteName:@"com.mlgm.pulloverx"];
 }

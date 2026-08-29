@@ -8,9 +8,5 @@
 #import <UIKit/UIKit.h>
 #import <Preferences/Preferences.h>
 
-@interface QSFavoritesPickerController : UITableViewController
-
-@property (nonatomic, strong) NSMutableArray *allApps;
-
-
+@interface QSFavoritesPickerController : UIViewController
 @end

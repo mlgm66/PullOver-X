@@ -25,6 +25,8 @@
 			<string>enabled</string>
 			<key>label</key>
 			<string>Enable</string>
+			<key>requiresRespring</key>
+			<true/>
 			<key>defaults</key>
 			<string>com.mlgm.pulloverx</string>
 			<key>set</key>
@@ -64,15 +66,9 @@
 		</dict>
 		<dict>
 			<key>cellClass</key>
-			<string>POSeparatorCell</string>
-			<key>id</key>
-			<string>quickSwitchRecentAppsDivider</string>
-			<key>height</key>
-			<real>1</real>
-		</dict>
-		<dict>
-			<key>cellClass</key>
 			<string>POStepperTableCell</string>
+			<key>default</key>
+			<integer>5</integer>
 			<key>key</key>
 			<string>recentAppsCount</string>
 			<key>id</key>
@@ -93,8 +89,6 @@
 			<string>favoriteApps</string>
 			<key>label</key>
 			<string>Select Favorite Apps</string>
-			<key>action</key>
-			<string>selectFavorites:</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -103,22 +97,6 @@
 			<true/>
 			<key>label</key>
 			<string>Appearance</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSwitchCell</string>
-			<key>default</key>
-			<false/>
-			<key>key</key>
-			<string>leftHanded</string>
-			<key>label</key>
-			<string>Left Handed Mode</string>
-			<key>defaults</key>
-			<string>com.mlgm.pulloverx</string>
-			<key>set</key>
-			<string>setValue:forSpecifier:</string>
-			<key>get</key>
-			<string>getValueForSpecifier:</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -173,8 +151,6 @@
 			<integer>50</integer>
 			<key>increment</key>
 			<integer>1</integer>
-			<key>unit</key>
-			<string>pt</string>
 		</dict>
 		<dict>
 			<key>cellClass</key>
@@ -184,7 +160,7 @@
 			<key>key</key>
 			<string>nubHiddenPercentage</string>
 			<key>label</key>
-			<string>Nub Hidden</string>
+			<string>Handle Hidden Percentage</string>
 			<key>defaults</key>
 			<string>com.mlgm.pulloverx</string>
 			<key>get</key>
@@ -207,16 +183,30 @@
 			<true/>
 			<key>label</key>
 			<string>Behavior</string>
+			<key>footerText</key>
+			<string>Only whitelisted target apps open in PullOver X when launched by another native app through a URL or Open In.</string>
 		</dict>
 		<dict>
-			<key>cell</key>
-			<string>PSSwitchCell</string>
+			<key>cellClass</key>
+			<string>POCompactSegmentTableCell</string>
 			<key>default</key>
-			<false/>
+			<string>rotate</string>
 			<key>key</key>
-			<string>hideInLandscape</string>
+			<string>landscapeBehavior</string>
 			<key>label</key>
-			<string>Hide in Landscape</string>
+			<string>When Landscape</string>
+			<key>validValues</key>
+			<array>
+				<string>rotate</string>
+				<string>lock</string>
+				<string>hide</string>
+			</array>
+			<key>validTitles</key>
+			<array>
+				<string>Rotate</string>
+				<string>Lock</string>
+				<string>Hide</string>
+			</array>
 			<key>defaults</key>
 			<string>com.mlgm.pulloverx</string>
 			<key>set</key>
@@ -233,6 +223,22 @@
 			<string>hapticFeedback</string>
 			<key>label</key>
 			<string>Haptic Feedback</string>
+			<key>defaults</key>
+			<string>com.mlgm.pulloverx</string>
+			<key>set</key>
+			<string>setValue:forSpecifier:</string>
+			<key>get</key>
+			<string>getValueForSpecifier:</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>key</key>
+			<string>soundFeedback</string>
+			<key>label</key>
+			<string>Sound Feedback</string>
 			<key>defaults</key>
 			<string>com.mlgm.pulloverx</string>
 			<key>set</key>
@@ -271,6 +277,57 @@
 			<string>setValue:forSpecifier:</string>
 			<key>get</key>
 			<string>getValueForSpecifier:</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<false/>
+			<key>key</key>
+			<string>externalURLRoutingEnabled</string>
+			<key>label</key>
+			<string>URL Routing</string>
+			<key>defaults</key>
+			<string>com.mlgm.pulloverx</string>
+			<key>set</key>
+			<string>setValue:forSpecifier:</string>
+			<key>get</key>
+			<string>getValueForSpecifier:</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSLinkListCell</string>
+			<key>default</key>
+			<array/>
+			<key>defaults</key>
+			<string>com.mlgm.pulloverx</string>
+			<key>detail</key>
+			<string>ATLApplicationListMultiSelectionController</string>
+			<key>key</key>
+			<string>externalURLRoutingWhitelist</string>
+			<key>label</key>
+			<string>URL Routing Whitelist</string>
+			<key>sections</key>
+			<array>
+				<dict>
+					<key>sectionType</key>
+					<string>User</string>
+				</dict>
+				<dict>
+					<key>sectionType</key>
+					<string>System</string>
+				</dict>
+			</array>
+			<key>showIdentifiersAsSubtitle</key>
+			<true/>
+			<key>defaultApplicationSwitchValue</key>
+			<false/>
+			<key>useSearchBar</key>
+			<true/>
+			<key>includeIdentifiersInSearch</key>
+			<true/>
+			<key>PostNotification</key>
+			<string>com.mlgm.pulloverx.settings-changed</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -357,14 +414,14 @@
 			<integer>44</integer>
 		</dict>
 		<dict>
-			<key>action</key>
-			<string>makeDonation:</string>
+			<key>cellClass</key>
+			<string>POProfileLinkCell</string>
 			<key>icon</key>
 			<string>paypal.png</string>
-			<key>cell</key>
-			<string>PSButtonCell</string>
 			<key>label</key>
 			<string>Donate (Original Developer)</string>
+			<key>url</key>
+			<string>https://paypal.me/willsmillie</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -372,7 +429,7 @@
 			<key>label</key>
 			<string>Currently Maintained</string>
 			<key>footerText</key>
-			<string>This build was modified by mlgm based on PullOver Pro.</string>
+			<string>This version was modified by mlgm based on PullOver Pro.</string>
 		</dict>
 		<dict>
 			<key>cellClass</key>

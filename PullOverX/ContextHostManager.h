@@ -3,52 +3,90 @@
 #import "headers.h"
 
 @class ContextHostManager;
+
 @protocol ContextHostManagerExternalSceneDelegate <NSObject>
--(void)contextManager:(id)manager scene:(FBScene *)scene sceneStackDidChange:(UIView *)sceneStack;
+@optional
+-(void)contextManager:(id)manager
+                scene:(FBScene *)scene
+  sceneStackDidChange:(UIView *)sceneStack
+       hostGeneration:(NSUInteger)generation;
 -(void)contextManager:(id)manager
                 scene:(FBScene *)scene
 externalSceneStackDidChange:(UIView *)sceneStack
-   containsKeyboardLayer:(BOOL)containsKeyboardLayer;
-@optional
-// The host manager has no UIWindow of its own. Its delegate supplies the
-// logical hosting canvas; PullOver deliberately uses a portrait canvas when
-// displaying portrait-oriented apps in landscape.
+   containsKeyboardLayer:(BOOL)containsKeyboardLayer
+       hostGeneration:(NSUInteger)generation;
 -(CGSize)contextManagerPreferredSceneStackSize:(id)manager;
-// The logical canvas has an orientation contract as well as a size contract.
-// A backgrounded app can retain the orientation it had when it left the
-// foreground; normalize the source scene before its layer is hosted.
+-(CGSize)contextManagerPreferredSystemSceneStackSize:(id)manager;
 -(UIInterfaceOrientation)contextManagerPreferredHostedInterfaceOrientation:(id)manager;
+-(void)contextManager:(id)manager
+                scene:(FBScene *)scene
+hostedInterfaceOrientationDidChange:(UIInterfaceOrientation)orientation
+systemAnimationParameters:(id)animationParameters
+       hostGeneration:(NSUInteger)generation;
+-(void)contextManager:(id)manager
+ sceneDidBecomeInvalid:(FBScene *)scene
+       hostGeneration:(NSUInteger)generation;
+-(void)contextManager:(id)manager
+                scene:(FBScene *)scene
+hostedPresentationContentDidBecomeUnavailableForBundleId:(NSString *)bundleId
+       hostGeneration:(NSUInteger)generation;
 @end
 
 @interface ContextHostManager : NSObject
 @property (nonatomic, weak) id <ContextHostManagerExternalSceneDelegate> sceneDelegate;
 @property (nonatomic, copy, readonly) NSString *activeHostedBundleId;
-+ (id)sharedInstance;
+@property (nonatomic, readonly) NSUInteger activeLeaseGeneration;
+@property (nonatomic, readonly, getter=isForegroundLeaseActive) BOOL foregroundLeaseActive;
+@property (nonatomic, readonly) UIInterfaceOrientation hostedInterfaceOrientation;
+@property (nonatomic, assign) UIInterfaceOrientation presentationInterfaceOrientation;
++ (instancetype)sharedInstance;
 
-// Used by SpringBoard hooks to keep PullOver-hosted scenes foregrounded.
 + (BOOL)shouldKeepForegroundForIdentifier:(NSString *)identifier;
 + (BOOL)shouldKeepForegroundForScene:(FBScene *)scene;
 + (NSString *)activeHostedBundleId;
-// Called from the SpringBoard FBScene update hooks. It keeps an incoming
-// system orientation update from breaking PullOver's virtual host orientation
-// while the scene is actively hosted.
-+ (void)applyHostedInterfaceOrientationToSettings:(id)settings forScene:(FBScene *)scene;
++ (void)reconcileHostedInterfaceOrientationInSettings:(id)settings forScene:(FBScene *)scene;
++ (id)prepareNativeSceneSettingsIfNeeded:(id)settings forScene:(FBScene *)scene;
++ (id)primePendingSceneRemnantSettings:(id)settings remnant:(id)remnant;
++ (void)completePendingSceneRemnantReconnect:(FBScene *)scene;
+-(FBScene *)probeSceneForBundleId:(NSString *)bundleId;
+-(BOOL)isProcessRunningForBundleId:(NSString *)bundleId;
+-(int)processIdentifierForBundleId:(NSString *)bundleId;
+-(UIInterfaceOrientation)preferredHostedInterfaceOrientationForBundleId:(NSString *)bundleId;
+-(BOOL)requiresCrossOrientationHostingForBundleId:(NSString *)bundleId;
+-(BOOL)requiresOwnedHostedSceneForBundleId:(NSString *)bundleId;
+-(void)requestPreparationForBundleId:(NSString *)bundleId;
+-(void)requestSystemDefaultScenePreparationForBundleId:(NSString *)bundleId;
+-(void)requestCrossOrientationSystemDefaultScenePreparationForBundleId:(NSString *)bundleId;
+-(void)prepareHostingIntentForBundleId:(NSString *)bundleId;
+-(void)prepareSystemDefaultSceneForHosting:(FBScene *)scene bundleId:(NSString *)bundleId;
+-(FBScene *)createHostedSceneForBundleId:(NSString *)bundleId;
+-(BOOL)isOwnedHostedScene:(FBScene *)scene bundleId:(NSString *)bundleId;
+-(BOOL)sceneHasRenderableMainLayer:(FBScene *)scene;
+-(BOOL)isHostedPresentationContentStableForBundleId:(NSString *)bundleId
+                                    minimumDuration:(NSTimeInterval)minimumDuration;
+-(UIImage *)captureSnapshotImageForActiveBundleId:(NSString *)bundleId;
+-(UIImage *)captureSnapshotImageForActiveBundleId:(NSString *)bundleId
+                                 sourceOrientation:(UIInterfaceOrientation)sourceOrientation;
+-(BOOL)isOwnedHostedSceneCapabilityProven:(FBScene *)scene bundleId:(NSString *)bundleId;
+-(UIInterfaceOrientation)publishedSourceOrientationForScene:(FBScene *)scene;
+-(CGSize)publishedSourceCanvasSizeForScene:(FBScene *)scene;
+-(UIInterfaceOrientation)currentHostedPresentationSourceOrientation;
+-(UIInterfaceOrientation)currentSystemInterfaceOrientation;
+-(BOOL)canonicalizeHostedSourceForCurrentOrientationWithGeneration:(NSUInteger)generation;
+-(BOOL)hasPendingRuntimeOrientationHandoffForScene:(FBScene *)scene
+                                        generation:(NSUInteger)generation;
+-(void)abandonOwnedHostedSceneForBundleId:(NSString *)bundleId;
 
--(UIView *)hostViewForBundleID:(NSString *)bundleId;
-
-// End the current PullOver hosting session and restore its scene to the normal
-// background state. The retained host view may remain in PullOver's hierarchy
-// as a visual snapshot, but it no longer owns the app's foreground scene.
--(void)stopHosting;
--(void)stopHostingView:(__weak UIView *)view forBundleId:(NSString *)bundleId;
--(BOOL)isHostingScene:(FBScene *)scene forBundleId:(NSString *)bundleId;
--(BOOL)isHostingBundleReady:(NSString *)bundleId;
--(BOOL)isHostViewHosting:(UIView *)hostView;
-
-// Background a specific app's scene (setForeground:NO) without disturbing the
-// scene currently being hosted/observed. Used to release the app we switched
-// away from once the new app's content is on screen.
--(void)backgroundSceneForBundleId:(NSString *)bundleId;
-
-
+-(void)activateScene:(FBScene *)scene
+         forBundleId:(NSString *)bundleId
+          generation:(NSUInteger)generation;
+-(void)releaseForegroundLease;
+-(void)releaseForegroundLeaseDiscardingOwnedScene;
+-(void)releaseForegroundLeaseForTargetSwitch;
+-(void)invalidateIOS26PresentationContainersInSceneStack:(UIView *)sceneStack;
+-(void)refreshPresentationForCurrentOrientation;
+-(void)recoverIOS26HostedContentAfterOrientationChange;
+-(BOOL)isForegroundLeaseActiveForScene:(FBScene *)scene
+                              bundleId:(NSString *)bundleId
+                            generation:(NSUInteger)generation;
 @end

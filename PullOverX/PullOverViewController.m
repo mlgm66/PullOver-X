@@ -6,26 +6,33 @@
 //
 
 #import "PullOverViewController.h"
+#import "POHostSessionController.h"
+#import "POQuickSwitchDragCoordinator.h"
+#import "POQuickSwitchMetrics.h"
+#import "POSplitSessionController.h"
+#import "QuickSwitchHorizontalBarView.h"
 #import "../POPPath.h"
 #import "../POLocalization.h"
-#define HANDLE_MARGIN 50
+#import <objc/message.h>
+#include <stdlib.h>
 #define HANDLE_EDGE_GAP 5
 #define CONTENT_EDGE_GAP 5
 #define CONTENT_CORNER_RADIUS 20
 #define CONTENT_SHADOW_OPACITY 0.28
 #define CONTENT_SHADOW_FADE_DISTANCE 12.0
 #define CLOSED_CONTENT_OFFSET_EPSILON 0.5
-#define HOSTING_FAST_RETRY_LIMIT 12
 #define PO_KEYBOARD_ZOOM_REQUESTED_SCALE 1.60
 #define PO_KEYBOARD_ZOOM_MINIMUM_USEFUL_SCALE 1.12
+#define PO_CARD_SCALE_EPSILON 0.001
+#define PO_HANDLE_CARD_SCALE_ANIMATION_DURATION 0.25
+#define PO_SCALED_PROGRAMMATIC_CLOSE_DURATION 0.28
+#define PO_SCALED_CLOSE_POST_COMMIT_CLEANUP_DELAY 0.035
 
 typedef NS_OPTIONS(NSUInteger, POKeyboardZoomSuspensionReason) {
-    POKeyboardZoomSuspensionNone        = 0,
-    POKeyboardZoomSuspensionDragging    = 1 << 0,
-    POKeyboardZoomSuspensionQuickSwitch = 1 << 1,
-    POKeyboardZoomSuspensionRotation    = 1 << 2,
-    POKeyboardZoomSuspensionClosing     = 1 << 3,
-    POKeyboardZoomSuspensionAppSwitch   = 1 << 4,
+    POKeyboardZoomSuspensionNone     = 0,
+    POKeyboardZoomSuspensionDragging = 1 << 0,
+    POKeyboardZoomSuspensionRotation = 1 << 1,
+    POKeyboardZoomSuspensionClosing  = 1 << 2,
 };
 
 typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
@@ -34,59 +41,182 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
     POKeyboardNotificationStateVisible,
 };
 
-@interface PullOverViewController ()<ContextHostManagerExternalSceneDelegate, UIGestureRecognizerDelegate>{
+typedef NS_ENUM(NSUInteger, POCardScaleContext) {
+    POCardScaleContextNone,
+    POCardScaleContextLandscapeShellPortraitHosted,
+};
+
+typedef NS_ENUM(NSUInteger, POCardScaleTransitionSource) {
+    POCardScaleTransitionSourceKeyboard,
+    POCardScaleTransitionSourceHandle,
+    POCardScaleTransitionSourceReconcile,
+};
+
+typedef NS_ENUM(NSUInteger, POPanelState) {
+    POPanelStateClosed,
+    POPanelStateOpening,
+    POPanelStateInteractive,
+    POPanelStateOpen,
+    POPanelStateClosing,
+};
+
+typedef NS_ENUM(NSUInteger, POQuickSwitchLayoutMode) {
+    POQuickSwitchLayoutModeVerticalSide,
+    POQuickSwitchLayoutModeHorizontalBottom,
+};
+
+typedef NS_ENUM(NSUInteger, POInteractionMode) {
+    POInteractionModeSplitPassthrough,
+    POInteractionModeDrawerModal,
+    POInteractionModeQuickSwitchModal,
+};
+
+typedef NS_ENUM(NSUInteger, POPanelPanIntent) {
+    POPanelPanIntentNone,
+    POPanelPanIntentHorizontalPanel,
+    POPanelPanIntentVerticalCardMove,
+};
+
+static BOOL POIsConcretePresentationOrientation(UIInterfaceOrientation orientation) {
+    return orientation == UIInterfaceOrientationPortrait ||
+        orientation == UIInterfaceOrientationPortraitUpsideDown ||
+        orientation == UIInterfaceOrientationLandscapeLeft ||
+        orientation == UIInterfaceOrientationLandscapeRight;
+}
+
+static CGFloat POPresentationAngleForOrientation(UIInterfaceOrientation orientation) {
+    switch (orientation) {
+        case UIInterfaceOrientationLandscapeLeft:
+            return (CGFloat)M_PI_2;
+        case UIInterfaceOrientationLandscapeRight:
+            return (CGFloat)-M_PI_2;
+        case UIInterfaceOrientationPortraitUpsideDown:
+            return (CGFloat)M_PI;
+        case UIInterfaceOrientationPortrait:
+        default:
+            return 0;
+    }
+}
+
+@interface PullOverViewController ()<POHostSessionControllerDelegate, UIGestureRecognizerDelegate>{
     NSString *pinnedBundleId;
     UIView *contextView;
-    // 托管 App 的键盘/外部图层栈，只保留最新一个，关闭时释放
     UIView *externalSceneStack;
     
-    UIView *dragAndDropView;
-    UIImageView *dragAndDropImageView;
-    UIImageView *draggableImageView;
-    UILabel *dragAndDropLabel;
+    UIView *mirrorZoneView;
+    CAShapeLayer *mirrorZoneBorder;
+    UIImageView *mirrorZoneIconView;
+    BOOL mirrorZoneHighlighted;
+    UIView *panelBackdropView;
+    UIView *quickSwitchBackdropView;
+    UITapGestureRecognizer *panelBackdropTapGestureRecognizer;
+    UIPanGestureRecognizer *panelBackdropPanGestureRecognizer;
     UIView *shadowView;
     UIView *keyboardZoomContainer;
-    UITapGestureRecognizer *closeTapGestureRecognizer;
-    // 无法托管时的占位画布，随卡片一起做竖转横变换
     UIView *cantHostCanvas;
     UIImageView *cantHostIconView;
     UILabel *cantHostLabel;
     
-    UIActivityIndicatorView *activityIndicator;
-    NSInteger hostingAttempts;
-    NSString *hostingRequestBundleId;
-    NSString *hostedBundleId;
-    NSString *pendingBackgroundBundleId;
-    BOOL hostUpdatesAllowed;
+    POHostSessionController *hostSession;
+    POPanelState panelState;
+    BOOL interactiveHostIntentIssued;
+    BOOL interactiveHostResumeRequired;
+    NSString *presentationBundleId;
+    FBScene *presentationSceneIdentity;
+    CGSize presentationCanvasSize;
+    UIInterfaceOrientation presentationOrientation;
+    CGSize presentationSourceCanvasSize;
+    UIInterfaceOrientation presentationSourceOrientation;
+    UIView *presentationSnapshotView;
+    NSString *presentationSnapshotBundleId;
+    FBScene *presentationSnapshotSceneIdentity;
+    BOOL presentationSnapshotIsTargetPlaceholder;
+    BOOL presentationSnapshotCapturedLeftHanded;
+    BOOL runtimeCategoryTransitionSnapshotActive;
+    BOOL runtimeCategoryTransitionSnapshotFallbackArmed;
+    BOOL runtimeCategoryTransitionSnapshotFading;
+    CGSize presentationSnapshotSize;
+    UIInterfaceOrientation presentationSnapshotOrientation;
+    UIInterfaceOrientation presentationSnapshotRenderSourceOrientation;
+    NSMutableDictionary<NSString *, NSDictionary *> *presentationSnapshotCache;
+    NSMutableArray<NSString *> *presentationSnapshotCacheOrder;
+    CADisplayLink *presentationHandoffDisplayLink;
+    NSUInteger presentationHandoffGeneration;
+    NSUInteger presentationHandoffStableFrames;
+    NSString *presentationHandoffBundleId;
+    BOOL presentationRetainedAfterRelease;
+    int retainedPresentationProcessPID;
     CGPoint handlePoint;
-    // chromeScale 维持把手竖向轨道；scale 是托管画布的整体缩放
     CGFloat chromeScale;
     CGFloat scale;
     CGFloat contentLayoutWidth;
+    UIInterfaceOrientation hostedLayoutOrientation;
     BOOL pendingOpenState;
-    // 拖动结束后统一改用与点按相同的程序化滚动。该标记在滚动真正结束前
-    // 阻止快捷切换菜单，避免卡片还残留在屏幕上时就被当作“已关闭”。
+    CGFloat panelPanStartOffsetX;
+    POPanelPanIntent panelPanIntent;
+    CGFloat panelVerticalMoveStartAnchorY;
     BOOL scrollSnapAnimationInProgress;
     BOOL quickSwitchOpeningApp;
+    QuickSwitchHorizontalBarView *quickSwitchHorizontalBarView;
+    UIView *quickSwitchInteractionOverlayView;
+    UIView<POQuickSwitchMenuPresenting> *presentedQuickSwitchMenu;
+    POQuickSwitchDragCoordinator *quickSwitchDragCoordinator;
+    NSUInteger quickSwitchPrewarmGeneration;
+    NSString *quickSwitchPrewarmBundleId;
+    NSUInteger deferredOpenGeneration;
+    NSString *externallyActivatedBundleId;
+    NSUInteger externallyActivatedGeneration;
+    NSUInteger handleIconRefreshGeneration;
     BOOL showingCantHost;
-    // 展开态弹出快捷菜单时，keyboardZoomContainer 整卡平移避让菜单并保留 5pt 间隙（不改尺寸）。
     BOOL quickSwitchYieldActive;
     CGRect quickSwitchSavedContainerFrame;
     CGRect keyboardZoomBaseFrame;
-    BOOL keyboardHostLayerPresent;
-    // UIKit keyboard notifications are the primary visibility state. The
-    // host-layer callback is asynchronous and is only used as a positive
-    // bootstrap/diagnostic signal, never as a gate for the first zoom.
+    UIView *handleVisualHandoffSnapshotView;
+    NSUInteger handleVisualHandoffGeneration;
+    BOOL runtimeHostedCategoryTransitionAnimating;
+    NSUInteger runtimeHostedCategoryTransitionGeneration;
+    BOOL hostedCategoryTransitionPending;
+    FBScene *deferredRuntimePublishedScene;
+    UIView *deferredRuntimePublishedSceneStack;
+    NSString *deferredRuntimePublishedBundleId;
+    NSUInteger deferredRuntimePublishedGeneration;
+    BOOL runtimeDeferredPublicationStageScheduled;
+    BOOL runtimeScenePublicationStaging;
+    CGFloat portraitHostedLandscapeHandleAnchorY;
     POKeyboardNotificationState keyboardNotificationState;
+    BOOL hostedKeyboardLayerPresent;
     BOOL keyboardHideAnimationInFlight;
+    NSUInteger keyboardStateHostGeneration;
     BOOL keyboardZoomApplied;
     POKeyboardZoomSuspensionReason keyboardZoomSuspensionReasons;
     NSUInteger keyboardZoomGeneration;
+    BOOL keyboardZoomSuppressedForCurrentSession;
+    CGFloat appliedCardScale;
+    CGFloat closingFrozenCardScale;
+    BOOL scaledProgrammaticCloseAnimating;
+    BOOL scaledProgrammaticCloseNeedsLayout;
+    BOOL deferScaledCloseSessionCleanup;
     NSTimeInterval lastKeyboardAnimationDuration;
     UIViewAnimationOptions lastKeyboardAnimationOptions;
     NSNumber *origOffset;
     CGSize lastLaidOutSize;
 }
+
+-(void)retainPresentationAfterReleaseIfPossible;
+-(BOOL)hasLiveRetainedPresentationForBundleId:(NSString *)bundleId;
+-(UIInterfaceOrientation)cachedPresentationOrientationForBundleId:(NSString *)bundleId;
+-(UIInterfaceOrientation)resolvedHostedOrientationForBundleId:(NSString *)bundleId
+                                                     manager:(ContextHostManager *)manager;
+-(void)flushDeferredRuntimeScenePublicationIfNeeded;
+-(void)scheduleRuntimeScenePublicationStagingIfNeeded;
+-(BOOL)prepareRuntimeCategoryTransitionSnapshotFromSourceOrientation:(UIInterfaceOrientation)sourceOrientation;
+-(void)prewarmRuntimeCategoryTransitionSnapshot;
+-(void)retargetRuntimeCategoryTransitionSnapshotForOrientation:(UIInterfaceOrientation)orientation;
+-(void)beginQuickSwitchSessionForMenu:(UIView<POQuickSwitchMenuPresenting> *)menu;
+-(void)finishQuickSwitchSessionForMenu:(UIView<POQuickSwitchMenuPresenting> *)menu;
+-(void)dismissPresentedQuickSwitchMenuImmediately;
+-(void)hideQuickSwitchBackdropImmediately;
+-(void)refreshHandleIconIfNeeded;
 
 @end
 
@@ -95,71 +225,54 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    panelBackdropView = [[UIView alloc] initWithFrame:self.view.bounds];
+    panelBackdropView.backgroundColor = UIColor.blackColor;
+    panelBackdropView.alpha = 0;
+    panelBackdropView.userInteractionEnabled = YES;
+    [self.view addSubview:panelBackdropView];
 
-    self.backgroundView = [[UIView alloc] initWithFrame:self.view.bounds];
-    self.backgroundView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.5];
-    self.backgroundView.alpha = 0;
-    [self.view addSubview:self.backgroundView];
-    
-    
-    UIImage *image = [UIImage systemImageNamed:@"arrowshape.turn.up.forward"];
-    
-    
-    dragAndDropView = [[UIView alloc] initWithFrame:CGRectMake(0,0,100,100)];
-    dragAndDropView.contentMode = UIViewContentModeScaleAspectFit;
-    dragAndDropView.center = CGPointMake(self.backgroundView.center.x, self.backgroundView.center.y);
-    dragAndDropView.alpha = 0;
-    [self.backgroundView addSubview:dragAndDropView];
-    
-    CAShapeLayer *border = [CAShapeLayer layer];
-    border.strokeColor = [UIColor whiteColor].CGColor;
-    border.fillColor = nil;
-    border.lineDashPattern = @[@4, @2];
-    [dragAndDropView.layer addSublayer:border];
-    
-    border.path = [UIBezierPath bezierPathWithRect:dragAndDropView.bounds].CGPath;
-    border.frame = dragAndDropView.bounds;
+    panelBackdropTapGestureRecognizer = [[UITapGestureRecognizer alloc]
+        initWithTarget:self action:@selector(panelBackdropDidTap:)];
+    panelBackdropTapGestureRecognizer.delegate = self;
+    [panelBackdropView addGestureRecognizer:panelBackdropTapGestureRecognizer];
 
+    panelBackdropPanGestureRecognizer = [[UIPanGestureRecognizer alloc]
+        initWithTarget:self action:@selector(panelBackdropDidPan:)];
+    panelBackdropPanGestureRecognizer.delegate = self;
+    [panelBackdropView addGestureRecognizer:panelBackdropPanGestureRecognizer];
 
-    dragAndDropImageView = [[UIImageView alloc] initWithFrame:CGRectMake(0, 0, 30, 30)];
-    dragAndDropImageView.image = [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
-    dragAndDropImageView.tintColor = [UIColor whiteColor];
-    dragAndDropImageView.contentMode = UIViewContentModeScaleAspectFit;
-    dragAndDropImageView.center = CGPointMake(dragAndDropView.frame.size.width/2, dragAndDropView.frame.size.height/2);
-    [dragAndDropView addSubview:dragAndDropImageView];
-    
-    
-    dragAndDropLabel = [[UILabel alloc] initWithFrame:CGRectMake(0,dragAndDropView.frame.size.height+dragAndDropView.frame.origin.y+16,200, 44)];
-    dragAndDropLabel.textColor = [UIColor whiteColor];
-    dragAndDropLabel.textAlignment = NSTextAlignmentCenter;
-    dragAndDropLabel.numberOfLines = 2;
-    dragAndDropLabel.text = POLocalizedString(@"Drag QuickSwitch Items\nHere To Open", @"Tweak");
-    [self.backgroundView addSubview:dragAndDropLabel];
-    dragAndDropLabel.alpha = 0;
-    dragAndDropLabel.center = CGPointMake(dragAndDropView.center.x, dragAndDropLabel.center.y);
-    
-    
+    mirrorZoneView = [[UIView alloc] initWithFrame:CGRectZero];
+    mirrorZoneView.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
+    mirrorZoneView.layer.cornerCurve = kCACornerCurveContinuous;
+    mirrorZoneView.alpha = 0;
+    [self.view addSubview:mirrorZoneView];
+
+    mirrorZoneBorder = [CAShapeLayer layer];
+    mirrorZoneBorder.strokeColor = UIColor.whiteColor.CGColor;
+    mirrorZoneBorder.fillColor = nil;
+    mirrorZoneBorder.lineWidth = PO_QUICKSWITCH_DROP_BORDER_WIDTH;
+    mirrorZoneBorder.lineDashPattern = PO_QUICKSWITCH_DROP_DASH_PATTERN;
+    mirrorZoneBorder.lineCap = kCALineCapRound;
+    [mirrorZoneView.layer addSublayer:mirrorZoneBorder];
+
+    mirrorZoneIconView = [[UIImageView alloc] initWithFrame:CGRectMake(0, 0, 24, 24)];
+    mirrorZoneIconView.image = [[UIImage systemImageNamed:@"arrow.left.arrow.right"]
+                                imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    mirrorZoneIconView.tintColor = UIColor.whiteColor;
+    mirrorZoneIconView.contentMode = UIViewContentModeScaleAspectFit;
+    [mirrorZoneView addSubview:mirrorZoneIconView];
+
     scrollView = [[UIScrollView alloc] initWithFrame:CGRectZero];
     [scrollView setDecelerationRate:UIScrollViewDecelerationRateFast];
     [scrollView setBackgroundColor:[UIColor clearColor]];
     [scrollView setShowsHorizontalScrollIndicator:NO];
-    // 安全区位置在下方统一计算，禁止 UIKit 自动追加 inset，避免刘海屏点按和拖动终点不同。
     scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
-    // 横屏卡片窄于实体屏幕，UIKit 全屏分页会超出实际行程，改由拖动结束时显式吸附。
     [scrollView setPagingEnabled:NO];
-    // 两端都允许 rubber-band：闭合端负向回弹触发把手收起，展开端过冲后由
-    // snapPanelToOpenState: 以动画平滑收回，禁止无动画硬夹造成闪一下。
     scrollView.bounces = YES;
     scrollView.alwaysBounceHorizontal = YES;
+    scrollView.scrollEnabled = NO;
     [scrollView setDelegate:self];
     [self.view addSubview:scrollView];
-    
-    // Outside taps retain PullOver's original close behavior. Keyboard
-    // visibility is driven exclusively by UIKit notifications; it must not
-    // be changed by this background gesture.
-    closeTapGestureRecognizer = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(close)];
-    closeTapGestureRecognizer.delegate = self;
-    [scrollView addGestureRecognizer:closeTapGestureRecognizer];
     
     handleScrollView = [[BaseScrollView alloc] initWithFrame:CGRectZero];
     [handleScrollView setShowsVerticalScrollIndicator:NO];
@@ -173,13 +286,28 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
     
     self.handle = [[POHandle alloc] initWithController:self];
     [self.handle setDelegate:self];
-    // 把手静止时与屏幕边缘保持 5pt 间隙，快捷菜单弹出时沿用该横坐标。
     [handleScrollView addSubview:self.handle];
     
     self.quickSwitchTableView = [[QuickSwitchTableView alloc] init];
     self.quickSwitchTableView.selectionDelegate = self;
     [handleScrollView addSubview:self.quickSwitchTableView];
-    
+
+    quickSwitchInteractionOverlayView = [[UIView alloc] initWithFrame:self.view.bounds];
+    quickSwitchInteractionOverlayView.backgroundColor = [UIColor clearColor];
+    quickSwitchInteractionOverlayView.clipsToBounds = NO;
+    quickSwitchInteractionOverlayView.userInteractionEnabled = NO;
+    quickSwitchInteractionOverlayView.hidden = YES;
+    [self.view addSubview:quickSwitchInteractionOverlayView];
+
+    quickSwitchDragCoordinator = [[POQuickSwitchDragCoordinator alloc]
+        initWithOverlayView:quickSwitchInteractionOverlayView];
+    [mirrorZoneView removeFromSuperview];
+    [quickSwitchInteractionOverlayView addSubview:mirrorZoneView];
+
+    quickSwitchHorizontalBarView = [[QuickSwitchHorizontalBarView alloc] init];
+    quickSwitchHorizontalBarView.selectionDelegate = self;
+    [quickSwitchInteractionOverlayView addSubview:quickSwitchHorizontalBarView];
+
     self.contentView = [[UIView alloc] initWithFrame:CGRectZero];
     self.contentView.backgroundColor = [UIColor secondarySystemBackgroundColor];
     self.contentView.layer.cornerRadius = CONTENT_CORNER_RADIUS;
@@ -190,52 +318,43 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
 
     keyboardZoomContainer = [[UIView alloc] initWithFrame:CGRectZero];
     keyboardZoomContainer.backgroundColor = [UIColor clearColor];
-    keyboardZoomContainer.clipsToBounds = NO;
-    // A hosted scene is kept alive after the panel closes so the next open can
-    // reuse its live layer.  Its off-screen frame alone is not a sufficient
-    // visibility guarantee while SpringBoard is rotating the overlay window:
-    // UIKit can commit one frame in the old coordinate space and briefly show
-    // the cached app scene.  The card is therefore explicitly hidden whenever
-    // PullOver is closed; opening makes the same cached container visible
-    // before its slide-in begins.
-    keyboardZoomContainer.hidden = YES;
+    keyboardZoomContainer.clipsToBounds = NO;    keyboardZoomContainer.hidden = YES;
     [scrollView addSubview:keyboardZoomContainer];
-    
-    activityIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
-    activityIndicator.frame = CGRectMake(42, 54, 37, 37);
-    activityIndicator.layer.shadowOpacity = 0.5;
-    activityIndicator.layer.shadowRadius = 6;
-    activityIndicator.layer.shadowOffset = CGSizeMake(0, 0);
-    [activityIndicator startAnimating];
 
-    [self.contentView addSubview:activityIndicator];
-
+    quickSwitchBackdropView = [[UIView alloc] initWithFrame:scrollView.bounds];
+    quickSwitchBackdropView.backgroundColor = UIColor.blackColor;
+    quickSwitchBackdropView.alpha = 0;
+    quickSwitchBackdropView.userInteractionEnabled = YES;
+    [scrollView addSubview:quickSwitchBackdropView];
+    [scrollView bringSubviewToFront:handleScrollView];
     
-    // 内容视图需裁剪以遮住托管内容的圆角，也会裁掉自身阴影；单独添加同尺寸圆角阴影视图。
-    // 阴影保持紧凑，避免边距较小时显得发灰、松散。
     shadowView = [[UIView alloc] initWithFrame:keyboardZoomContainer.bounds];
     shadowView.backgroundColor = [UIColor clearColor];
     shadowView.layer.shadowColor = [UIColor blackColor].CGColor;
     shadowView.layer.shadowOffset = CGSizeMake(0, 1);
     shadowView.layer.shadowRadius = 8;
-    // 卡片初始位于右侧屏幕外，进入屏幕前关闭阴影，避免阴影残留在闭合边框。
     shadowView.layer.shadowOpacity = 0;
     shadowView.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:shadowView.bounds cornerRadius:CONTENT_CORNER_RADIUS].CGPath;
     [keyboardZoomContainer addSubview:shadowView];
 
     [keyboardZoomContainer addSubview:self.contentView];
-    
-    if ([[NSUserDefaults standardUserDefaults] stringForKey:@"lastPinnedBundleId"]) {
-        pinnedBundleId = [[NSUserDefaults standardUserDefaults] stringForKey:@"lastPinnedBundleId"];
-        UIImage *image = [POApplicationHelper imageForBundleId:pinnedBundleId];
-        self.handle.imageView.image = image;
-    }else{
+
+    NSString *savedPinnedBundleId = [[NSUserDefaults standardUserDefaults] stringForKey:@"lastPinnedBundleId"];
+    if ([POApplicationHelper isUserFacingApplicationBundleId:savedPinnedBundleId]) {
+        pinnedBundleId = savedPinnedBundleId;
+    } else {
+        if (savedPinnedBundleId.length > 0) {
+            [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"lastPinnedBundleId"];
+        }
         pinnedBundleId = @"com.apple.MobileSMS";
-        UIImage *image = [POApplicationHelper imageForBundleId:pinnedBundleId];
-        self.handle.imageView.image = image;
     }
+    [self refreshHandleIconIfNeeded];
     
-    [[ContextHostManager sharedInstance] setSceneDelegate:self];
+    panelState = POPanelStateClosed;
+    interactiveHostIntentIssued = NO;
+    interactiveHostResumeRequired = NO;
+    hostSession = [[POHostSessionController alloc] initWithManager:[ContextHostManager sharedInstance]];
+    hostSession.delegate = self;
     
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillShow:) name:UIKeyboardWillShowNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillChangeFrame:) name:UIKeyboardWillChangeFrameNotification object:nil];
@@ -248,6 +367,12 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
     lastKeyboardAnimationOptions = UIViewAnimationOptionBeginFromCurrentState |
         UIViewAnimationOptionAllowUserInteraction |
         (UIViewAnimationOptionCurveEaseInOut << 16);
+    keyboardZoomSuppressedForCurrentSession = NO;
+    appliedCardScale = 1.0;
+    closingFrozenCardScale = 1.0;
+    scaledProgrammaticCloseAnimating = NO;
+    scaledProgrammaticCloseNeedsLayout = NO;
+    deferScaledCloseSessionCleanup = NO;
 
     [self applyCurrentSettings];
 }
@@ -256,15 +381,19 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
     if (!self.isViewLoaded) {
         return;
     }
-
+    if (scaledProgrammaticCloseAnimating) {
+        scaledProgrammaticCloseNeedsLayout = YES;
+        return;
+    }
+    [self dismissPresentedQuickSwitchMenuImmediately];
     BOOL isLeftHanded = [[POApplicationHelper settings][@"leftHanded"] boolValue];
     CGAffineTransform contentTransform = isLeftHanded
         ? CGAffineTransformMakeScale(-1.0, 1.0)
         : CGAffineTransformIdentity;
-    dragAndDropImageView.transform = contentTransform;
-    dragAndDropLabel.transform = contentTransform;
     self.handle.imageView.transform = contentTransform;
     [self.quickSwitchTableView refreshLayoutDirection];
+    [quickSwitchHorizontalBarView refreshLayoutDirection];
+    [quickSwitchDragCoordinator refreshLayoutDirection];
 
     if (![[POApplicationHelper settings][@"keyboardAvoiding"] boolValue] && origOffset) {
         [handleScrollView setContentOffset:CGPointMake(0, [self clampedHandleOffset:origOffset.floatValue]) animated:YES];
@@ -274,15 +403,46 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
     [self.handle refreshHandleSizeAnimated:NO];
     [self applyLayoutPreservingHandlePosition:YES];
     [self.handle refreshNubbedPositionAnimated:NO];
-    // The setting can change while the keyboard is already visible. Reconcile
-    // immediately so turning the option off removes the transform without
-    // waiting for another keyboard notification.
     [self reevaluateKeyboardZoomAnimated:YES];
-    [self resetAutoNubTimer];
+    if (self.view.window && self.view.window.userInteractionEnabled && self.view.alpha > 0.01) {
+        [self resetAutoNubTimer];
+    } else {
+        [self cancelAutoNubTimer];
+    }
 }
 
 -(void)dealloc{
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+-(void)refreshHandleIconIfNeeded{
+    NSUInteger generation = ++handleIconRefreshGeneration;
+    NSString *bundleId = [pinnedBundleId copy];
+    if (bundleId.length == 0) {
+        self.handle.imageView.image = nil;
+        return;
+    }
+
+    UIImage *image = [POApplicationHelper imageForBundleId:bundleId];
+    if (image) {
+        self.handle.imageView.image = image;
+        return;
+    }
+
+    for (NSNumber *delay in @[@0.15, @0.5, @1.5, @3.0]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                      (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (generation != self->handleIconRefreshGeneration ||
+                ![self->pinnedBundleId isEqualToString:bundleId]) {
+                return;
+            }
+            UIImage *retryImage = [POApplicationHelper imageForBundleId:bundleId];
+            if (retryImage) {
+                self.handle.imageView.image = retryImage;
+            }
+        });
+    }
 }
 
 -(void)viewDidLayoutSubviews{
@@ -291,13 +451,39 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
     if (!CGSizeEqualToSize(lastLaidOutSize, self.view.bounds.size)) {
         [self applyLayoutPreservingHandlePosition:YES];
     }
+    [self reconcilePresentedContainerGeometry];
 }
 
 -(void)viewSafeAreaInsetsDidChange{
     [super viewSafeAreaInsetsDidChange];
-    // 悬浮 UIWindowScene 的安全区常晚于最终尺寸更新；即使尺寸不变也要重排，
-    // 以便首次横屏获得真实的刘海或灵动岛边距，而不是初始的 0。
     [self applyLayoutPreservingHandlePosition:YES];
+}
+
+-(void)reconcilePresentedContainerGeometry{
+    if (panelState == POPanelStateClosed || keyboardZoomContainer.hidden ||
+        quickSwitchYieldActive || keyboardZoomApplied ||
+        runtimeHostedCategoryTransitionAnimating ||
+        !CGAffineTransformEqualToTransform(keyboardZoomContainer.transform,
+                                            CGAffineTransformIdentity) ||
+        CGRectIsEmpty(keyboardZoomBaseFrame)) {
+        return;
+    }
+
+    CGRect currentFrame = keyboardZoomContainer.frame;
+    if (fabs(CGRectGetMinX(currentFrame) - CGRectGetMinX(keyboardZoomBaseFrame)) <= 0.25 &&
+        fabs(CGRectGetMinY(currentFrame) - CGRectGetMinY(keyboardZoomBaseFrame)) <= 0.25 &&
+        fabs(CGRectGetWidth(currentFrame) - CGRectGetWidth(keyboardZoomBaseFrame)) <= 0.25 &&
+        fabs(CGRectGetHeight(currentFrame) - CGRectGetHeight(keyboardZoomBaseFrame)) <= 0.25) {
+        return;
+    }
+
+    [keyboardZoomContainer.layer removeAllAnimations];
+    keyboardZoomContainer.frame = keyboardZoomBaseFrame;
+    shadowView.frame = keyboardZoomContainer.bounds;
+    self.contentView.frame = keyboardZoomContainer.bounds;
+    shadowView.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:shadowView.bounds
+                                                              cornerRadius:CONTENT_CORNER_RADIUS].CGPath;
+    [self layoutContextView];
 }
 
 #pragma mark - Geometry
@@ -307,26 +493,936 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
     UIEdgeInsets windowInsets = self.view.window.safeAreaInsets;
     BOOL isLeftHanded = [[POApplicationHelper settings][@"leftHanded"] boolValue];
     CGFloat viewTrailingInset = isLeftHanded ? viewInsets.left : viewInsets.right;
-    CGFloat windowTrailingInset = isLeftHanded ? windowInsets.left : windowInsets.right;
-    // SpringBoard 可能比根视图早一轮写入场景窗口安全区，取两者较大值可兼容两种时序，
-    // 直屏设备仍为 0。
-    return MAX(0, MAX(viewTrailingInset, windowTrailingInset));
+    CGFloat windowTrailingInset = isLeftHanded ? windowInsets.left : windowInsets.right;    return MAX(0, MAX(viewTrailingInset, windowTrailingInset));
 }
 
 -(CGFloat)leadingSafeAreaInset{
     UIEdgeInsets viewInsets = self.view.safeAreaInsets;
     UIEdgeInsets windowInsets = self.view.window.safeAreaInsets;
     BOOL isLeftHanded = [[POApplicationHelper settings][@"leftHanded"] boolValue];
-    // PullOverX mirrors the whole window in left-handed mode. The local
-    // leading edge therefore maps to the physical right safe area.
     CGFloat viewLeadingInset = isLeftHanded ? viewInsets.right : viewInsets.left;
     CGFloat windowLeadingInset = isLeftHanded ? windowInsets.right : windowInsets.left;
     return MAX(0, MAX(viewLeadingInset, windowLeadingInset));
 }
 
+-(BOOL)isPanelActive{
+    return panelState != POPanelStateClosed;
+}
+
+-(POInteractionMode)baseInteractionModeForHostedOrientation:(UIInterfaceOrientation)hostedOrientation{
+    if (!POIsConcretePresentationOrientation(hostedOrientation)) {
+        return POInteractionModeSplitPassthrough;
+    }
+    CGRect bounds = self.view.bounds;
+    BOOL shellIsLandscape = CGRectGetWidth(bounds) > CGRectGetHeight(bounds);
+    BOOL hostedIsLandscape = UIInterfaceOrientationIsLandscape(hostedOrientation);
+    return shellIsLandscape == hostedIsLandscape
+        ? POInteractionModeDrawerModal
+        : POInteractionModeSplitPassthrough;
+}
+
+-(POInteractionMode)currentInteractionMode{
+    if (presentedQuickSwitchMenu) {
+        return POInteractionModeQuickSwitchModal;
+    }
+    if (panelState == POPanelStateClosed) {
+        return POInteractionModeSplitPassthrough;
+    }
+    if (hostedCategoryTransitionPending || runtimeHostedCategoryTransitionAnimating) {
+        return POInteractionModeSplitPassthrough;
+    }
+    return [self baseInteractionModeForHostedOrientation:[self resolvedHostedLayoutOrientation]];
+}
+
+-(UIInterfaceOrientation)resolvedHostedLayoutOrientation{
+    if (POIsConcretePresentationOrientation(hostedLayoutOrientation)) {
+        return hostedLayoutOrientation;
+    }
+
+    UIInterfaceOrientation orientation = [self contextManagerPreferredHostedInterfaceOrientation:nil];
+    if (POIsConcretePresentationOrientation(orientation)) {
+        hostedLayoutOrientation = orientation;
+    }
+    return orientation;
+}
+
+-(void)updateInteractionBackdropsAnimated:(BOOL)animated{
+    if (!panelBackdropView || !quickSwitchBackdropView || !scrollView) {
+        return;
+    }
+    panelBackdropView.frame = self.view.bounds;
+    quickSwitchBackdropView.frame = scrollView.bounds;
+
+    POInteractionMode mode = [self currentInteractionMode];
+    CGFloat panelTargetAlpha = scaledProgrammaticCloseAnimating
+        ? 0
+        : (mode == POInteractionModeDrawerModal ? 0.5 * [self horizontalOpenProgress] : 0);
+    CGFloat quickSwitchTargetAlpha = scaledProgrammaticCloseAnimating
+        ? 0
+        : (mode == POInteractionModeQuickSwitchModal ? 0.5 : 0);
+
+    if (mode == POInteractionModeQuickSwitchModal) {
+        [scrollView bringSubviewToFront:quickSwitchBackdropView];
+        [scrollView bringSubviewToFront:handleScrollView];
+    }
+
+    void (^changes)(void) = ^{
+        self->panelBackdropView.alpha = panelTargetAlpha;
+        self->quickSwitchBackdropView.alpha = quickSwitchTargetAlpha;
+    };
+    if (animated) {
+        [UIView animateWithDuration:0.20
+                              delay:0
+                            options:(UIViewAnimationOptionCurveEaseOut |
+                                     UIViewAnimationOptionBeginFromCurrentState |
+                                     UIViewAnimationOptionAllowUserInteraction)
+                         animations:changes
+                         completion:nil];
+    } else {
+        [panelBackdropView.layer removeAllAnimations];
+        [quickSwitchBackdropView.layer removeAllAnimations];
+        [UIView performWithoutAnimation:changes];
+    }
+}
+
+-(void)panelBackdropDidTap:(UITapGestureRecognizer *)recognizer{
+    if (recognizer.state != UIGestureRecognizerStateEnded ||
+        [self currentInteractionMode] != POInteractionModeDrawerModal ||
+        panelState != POPanelStateOpen || [self isPanelTransitioning]) {
+        return;
+    }
+    [self close];
+}
+
+-(void)panelBackdropDidPan:(UIPanGestureRecognizer *)recognizer{
+    if ([self currentInteractionMode] != POInteractionModeDrawerModal &&
+        recognizer.state == UIGestureRecognizerStateBegan) {
+        return;
+    }
+    [self handle:self.handle didPanPanel:recognizer];
+}
+
+-(BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer{
+    if (gestureRecognizer == panelBackdropTapGestureRecognizer) {
+        return [self currentInteractionMode] == POInteractionModeDrawerModal &&
+            panelState == POPanelStateOpen && ![self isPanelTransitioning];
+    }
+    if (gestureRecognizer == panelBackdropPanGestureRecognizer) {
+        if ([self currentInteractionMode] != POInteractionModeDrawerModal ||
+            panelState != POPanelStateOpen || [self isPanelTransitioning]) {
+            return NO;
+        }
+        CGPoint velocity = [(UIPanGestureRecognizer *)gestureRecognizer velocityInView:self.view];
+        return fabs(velocity.x) > fabs(velocity.y) && fabs(velocity.x) > 20.0;
+    }
+    return YES;
+}
+
+-(UIView *)interactiveViewForWindowPoint:(CGPoint)point event:(UIEvent *)event{
+    if (!self.isViewLoaded || self.view.hidden || self.view.alpha <= 0.01) {
+        return nil;
+    }
+
+    CGPoint pointInView = [self.view convertPoint:point fromView:self.view.window];
+    CGPoint handlePointInHandle = [self.handle convertPoint:point fromView:self.view.window];
+    if (!self.handle.hidden && self.handle.alpha > 0.01 &&
+        [self.handle pointInside:handlePointInHandle withEvent:event]) {
+        return self.handle;
+    }
+
+    UIView *candidate = [self.view hitTest:pointInView withEvent:event];
+    if (candidate && candidate != self.view && candidate != scrollView &&
+        candidate != quickSwitchInteractionOverlayView && candidate != panelBackdropView &&
+        candidate != quickSwitchBackdropView) {
+        for (UIView *view = candidate; view; view = view.superview) {
+            if (view == keyboardZoomContainer || view == self.contentView ||
+                view == self.quickSwitchTableView || view == quickSwitchHorizontalBarView) {
+                return candidate;
+            }
+            if (view == self.view) {
+                break;
+            }
+        }
+    }
+
+    switch ([self currentInteractionMode]) {
+        case POInteractionModeQuickSwitchModal:
+            return quickSwitchBackdropView;
+        case POInteractionModeDrawerModal:
+            return panelBackdropView;
+        case POInteractionModeSplitPassthrough:
+        default:
+            return nil;
+    }
+}
+
+-(BOOL)shouldUsePortraitHostedLandscapeOptimizationForOrientation:(UIInterfaceOrientation)orientation{
+    CGRect bounds = self.view.bounds;
+    BOOL shellIsPortrait = CGRectGetHeight(bounds) > CGRectGetWidth(bounds);
+    return shellIsPortrait && UIInterfaceOrientationIsLandscape(orientation);
+}
+
+-(BOOL)isPortraitHostedLandscapeOptimizationActiveForOrientation:(UIInterfaceOrientation)orientation{
+    return panelState != POPanelStateClosed &&
+        [self shouldUsePortraitHostedLandscapeOptimizationForOrientation:orientation];
+}
+
+-(POQuickSwitchLayoutMode)currentQuickSwitchLayoutMode{
+    UIInterfaceOrientation orientation = [self resolvedHostedLayoutOrientation];
+    return [self isPortraitHostedLandscapeOptimizationActiveForOrientation:orientation]
+        ? POQuickSwitchLayoutModeHorizontalBottom
+        : POQuickSwitchLayoutModeVerticalSide;
+}
+
+-(BOOL)isHorizontalQuickSwitchLayoutMode{
+    return [self currentQuickSwitchLayoutMode] == POQuickSwitchLayoutModeHorizontalBottom;
+}
+
+-(UIView<POQuickSwitchMenuPresenting> *)quickSwitchMenuForLayoutMode:(POQuickSwitchLayoutMode)mode{
+    return mode == POQuickSwitchLayoutModeHorizontalBottom
+        ? (UIView<POQuickSwitchMenuPresenting> *)quickSwitchHorizontalBarView
+        : (UIView<POQuickSwitchMenuPresenting> *)self.quickSwitchTableView;
+}
+
+-(BOOL)isHorizontalQuickSwitchMenu:(UIView<POQuickSwitchMenuPresenting> *)menu{
+    return menu == (UIView<POQuickSwitchMenuPresenting> *)quickSwitchHorizontalBarView;
+}
+
+-(BOOL)isPanelFullyOpen{
+    return panelState == POPanelStateOpen &&
+        !scrollSnapAnimationInProgress && !scrollView.dragging && !scrollView.decelerating &&
+        fabs(scrollView.contentOffset.x - [self maximumContentOffsetX]) <= CLOSED_CONTENT_OFFSET_EPSILON;
+}
+
+-(BOOL)isPanelTransitioning{
+    return panelState == POPanelStateOpening || panelState == POPanelStateClosing ||
+        panelState == POPanelStateInteractive || scrollSnapAnimationInProgress;
+}
+
+-(void)cancelPresentationHandoff{
+    [presentationHandoffDisplayLink invalidate];
+    presentationHandoffDisplayLink = nil;
+    presentationHandoffGeneration = 0;
+    presentationHandoffStableFrames = 0;
+    presentationHandoffBundleId = nil;
+}
+
+-(void)clearPresentationSnapshot{
+    [self cancelPresentationHandoff];
+    [presentationSnapshotView removeFromSuperview];
+    presentationSnapshotView = nil;
+    presentationSnapshotBundleId = nil;
+    presentationSnapshotSceneIdentity = nil;
+    presentationSnapshotIsTargetPlaceholder = NO;
+    presentationSnapshotCapturedLeftHanded = NO;
+    runtimeCategoryTransitionSnapshotActive = NO;
+    runtimeCategoryTransitionSnapshotFallbackArmed = NO;
+    runtimeCategoryTransitionSnapshotFading = NO;
+    presentationSnapshotSize = CGSizeZero;
+    presentationSnapshotOrientation = UIInterfaceOrientationUnknown;
+    presentationSnapshotRenderSourceOrientation = UIInterfaceOrientationUnknown;
+}
+
+-(void)showRuntimeCategoryTransitionSnapshotFallback{
+    if (!runtimeCategoryTransitionSnapshotFallbackArmed ||
+        !presentationSnapshotView || presentationSnapshotIsTargetPlaceholder) {
+        return;
+    }
+    [presentationSnapshotView.layer removeAllAnimations];
+    presentationSnapshotView.alpha = 1;
+    presentationSnapshotView.hidden = NO;
+    runtimeCategoryTransitionSnapshotFading = NO;
+    runtimeCategoryTransitionSnapshotActive = YES;
+    UIInterfaceOrientation targetOrientation =
+        [self contextManagerPreferredHostedInterfaceOrientation:nil];
+    [self retargetRuntimeCategoryTransitionSnapshotForOrientation:targetOrientation];
+    [presentationSnapshotView layoutIfNeeded];
+    [presentationSnapshotView.layer setNeedsDisplay];
+    [presentationSnapshotView.layer displayIfNeeded];
+    UIView *sourceView = presentationSnapshotView.subviews.firstObject;
+    [sourceView layoutIfNeeded];
+    [sourceView.layer setNeedsDisplay];
+    [sourceView.layer displayIfNeeded];
+    [self.contentView bringSubviewToFront:presentationSnapshotView];
+}
+
+-(void)prewarmRuntimeCategoryTransitionSnapshot{
+    if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion < 26 ||
+        !presentationSnapshotView || presentationSnapshotIsTargetPlaceholder ||
+        runtimeCategoryTransitionSnapshotActive || runtimeCategoryTransitionSnapshotFading) {
+        return;
+    }
+    presentationSnapshotView.hidden = NO;
+    presentationSnapshotView.alpha = 1.0;
+    [self layoutPresentationSnapshotView];
+    [presentationSnapshotView layoutIfNeeded];
+    [presentationSnapshotView.layer setNeedsDisplay];
+    [presentationSnapshotView.layer displayIfNeeded];
+    UIView *sourceView = presentationSnapshotView.subviews.firstObject;
+    [sourceView layoutIfNeeded];
+    [sourceView.layer setNeedsDisplay];
+    [sourceView.layer displayIfNeeded];
+    [self.contentView bringSubviewToFront:presentationSnapshotView];
+}
+
+-(void)schedulePresentationSnapshotRetirementForBundleId:(NSString *)bundleId
+                                               generation:(NSUInteger)generation{
+    if (bundleId.length == 0 || generation == 0 || !presentationSnapshotView ||
+        presentationSnapshotView.hidden || !contextView || contextView.hidden) {
+        return;
+    }
+    presentationHandoffGeneration = generation;
+    presentationHandoffBundleId = [bundleId copy];
+    presentationHandoffStableFrames = 0;
+    if (!presentationHandoffDisplayLink) {
+        presentationHandoffDisplayLink = [CADisplayLink displayLinkWithTarget:self
+                                                                     selector:@selector(handlePresentationHandoffDisplayLink:)];
+        [presentationHandoffDisplayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+    }
+}
+
+-(void)handlePresentationHandoffDisplayLink:(CADisplayLink *)__unused displayLink{
+    if (!presentationSnapshotView || presentationSnapshotView.hidden ||
+        presentationHandoffGeneration == 0 ||
+        presentationHandoffGeneration != hostSession.currentGeneration ||
+        ![presentationHandoffBundleId isEqualToString:hostSession.requestedBundleId]) {
+        [self cancelPresentationHandoff];
+        return;
+    }
+    if (panelState != POPanelStateOpen || scrollSnapAnimationInProgress ||
+        hostSession.state != POHostSessionStateLive || !contextView || contextView.hidden ||
+        contextView.superview != self.contentView) {
+        presentationHandoffStableFrames = 0;
+        return;
+    }
+
+    ContextHostManager *manager = [ContextHostManager sharedInstance];
+    BOOL requiresStableContentHandoff = runtimeCategoryTransitionSnapshotActive ||
+        runtimeCategoryTransitionSnapshotFallbackArmed;
+    if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26 &&
+        requiresStableContentHandoff &&
+        ![manager isHostedPresentationContentStableForBundleId:presentationHandoffBundleId
+                                               minimumDuration:0.15]) {
+        presentationHandoffStableFrames = 0;
+        return;
+    }
+
+    presentationHandoffStableFrames += 1;
+    if (presentationHandoffStableFrames < 3) {
+        return;
+    }
+
+    if (runtimeCategoryTransitionSnapshotActive) {
+        UIView *snapshot = presentationSnapshotView;
+        NSUInteger generation = presentationHandoffGeneration;
+        NSString *bundleId = [presentationHandoffBundleId copy];
+        runtimeCategoryTransitionSnapshotActive = NO;
+        runtimeCategoryTransitionSnapshotFading = NO;
+        [self cancelPresentationHandoff];
+        [UIView performWithoutAnimation:^{
+            snapshot.alpha = 0;
+            snapshot.hidden = YES;
+        }];
+        if (snapshot == self->presentationSnapshotView &&
+            generation == self->hostSession.currentGeneration &&
+            [bundleId isEqualToString:self->hostSession.requestedBundleId]) {
+            [self clearPresentationSnapshot];
+        }
+        return;
+    }
+
+    [self clearPresentationSnapshot];
+}
+
+-(void)layoutPresentationSnapshotView{
+    if (!presentationSnapshotView) {
+        return;
+    }
+
+    BOOL currentLeftHanded = [[POApplicationHelper settings][@"leftHanded"] boolValue];
+    BOOL shouldMirrorLocally = presentationSnapshotIsTargetPlaceholder
+        ? currentLeftHanded
+        : (presentationSnapshotCapturedLeftHanded != currentLeftHanded);
+    [UIView performWithoutAnimation:^{
+        presentationSnapshotView.transform = CGAffineTransformIdentity;
+        presentationSnapshotView.bounds = (CGRect){CGPointZero, self.contentView.bounds.size};
+        presentationSnapshotView.center = CGPointMake(CGRectGetMidX(self.contentView.bounds),
+                                                       CGRectGetMidY(self.contentView.bounds));
+        presentationSnapshotView.transform = shouldMirrorLocally
+            ? CGAffineTransformMakeScale(-1.0, 1.0)
+            : CGAffineTransformIdentity;
+
+        if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26 &&
+            !presentationSnapshotIsTargetPlaceholder && self->contextView) {
+            UIView *sourceView = presentationSnapshotView.subviews.firstObject;
+            if ([sourceView isKindOfClass:[UIImageView class]]) {
+                UIInterfaceOrientation sourceOrientation = presentationSnapshotRenderSourceOrientation;
+                UIInterfaceOrientation targetOrientation = presentationSnapshotOrientation;
+                if (!POIsConcretePresentationOrientation(sourceOrientation)) {
+                    sourceOrientation = targetOrientation;
+                }
+                if (!POIsConcretePresentationOrientation(targetOrientation)) {
+                    targetOrientation = hostedLayoutOrientation;
+                }
+                CGSize sourceCanvas = sourceView.bounds.size;
+                BOOL sourceAndTargetCategoriesDiffer =
+                    POIsConcretePresentationOrientation(sourceOrientation) &&
+                    POIsConcretePresentationOrientation(targetOrientation) &&
+                    UIInterfaceOrientationIsLandscape(sourceOrientation) !=
+                        UIInterfaceOrientationIsLandscape(targetOrientation);
+                BOOL targetMatchesShell =
+                    POIsConcretePresentationOrientation(targetOrientation) &&
+                    UIInterfaceOrientationIsLandscape(targetOrientation) ==
+                        (CGRectGetWidth(self.view.bounds) > CGRectGetHeight(self.view.bounds));
+                if (!sourceAndTargetCategoriesDiffer || !targetMatchesShell) {
+                    sourceView.bounds = self->contextView.bounds;
+                    sourceView.center = self->contextView.center;
+                    sourceView.transform = self->contextView.transform;
+                    return;
+                }
+
+                UIImage *image = ((UIImageView *)sourceView).image;
+                if (image.size.width > 0 && image.size.height > 0) {
+                    sourceCanvas = image.size;
+                }
+                if (sourceCanvas.width <= 0 || sourceCanvas.height <= 0) {
+                    sourceCanvas = self->contextView.bounds.size;
+                }
+                sourceView.bounds = (CGRect){CGPointZero, sourceCanvas};
+                sourceView.center = self->contextView.center;
+
+                CGAffineTransform contextTransform = self->contextView.transform;
+                CGFloat scaleX = hypot(contextTransform.a, contextTransform.b);
+                CGFloat scaleY = hypot(contextTransform.c, contextTransform.d);
+                if (!isfinite(scaleX) || scaleX <= 0) {
+                    scaleX = 1;
+                }
+                if (!isfinite(scaleY) || scaleY <= 0) {
+                    scaleY = 1;
+                }
+                CGFloat rotationAngle = 0;
+                if (POIsConcretePresentationOrientation(sourceOrientation) &&
+                    POIsConcretePresentationOrientation(targetOrientation)) {
+                    rotationAngle = POPresentationAngleForOrientation(targetOrientation) -
+                        POPresentationAngleForOrientation(sourceOrientation);
+                }
+                CGAffineTransform sourceTransform = CGAffineTransformMakeRotation(rotationAngle);
+                sourceTransform = CGAffineTransformScale(sourceTransform, scaleX, scaleY);
+                if (contextTransform.a * contextTransform.d -
+                    contextTransform.b * contextTransform.c < 0) {
+                    sourceTransform = CGAffineTransformConcat(
+                        sourceTransform, CGAffineTransformMakeScale(-1.0, 1.0));
+                }
+                sourceView.transform = sourceTransform;
+            }
+        }
+    }];
+}
+
+-(void)cachePresentationSnapshotView:(UIView *)snapshotView
+                            bundleId:(NSString *)bundleId
+                               scene:(FBScene *)scene
+                                size:(CGSize)size
+                         orientation:(UIInterfaceOrientation)orientation
+                  capturedLeftHanded:(BOOL)capturedLeftHanded{
+    if (!snapshotView || bundleId.length == 0) {
+        return;
+    }
+    if (!presentationSnapshotCache) {
+        presentationSnapshotCache = [NSMutableDictionary dictionary];
+        presentationSnapshotCacheOrder = [NSMutableArray array];
+    }
+    int processPID = [[ContextHostManager sharedInstance] processIdentifierForBundleId:bundleId];
+    presentationSnapshotCache[bundleId] = @{
+        @"view": snapshotView,
+        @"scene": scene ?: (id)NSNull.null,
+        @"pid": @(processPID),
+        @"size": [NSValue valueWithCGSize:size],
+        @"orientation": @(orientation),
+        @"leftHanded": @(capturedLeftHanded)
+    };
+    [presentationSnapshotCacheOrder removeObject:bundleId];
+    [presentationSnapshotCacheOrder addObject:bundleId];
+    while (presentationSnapshotCacheOrder.count > 6) {
+        NSString *oldestBundleId = presentationSnapshotCacheOrder.firstObject;
+        [presentationSnapshotCacheOrder removeObjectAtIndex:0];
+        [presentationSnapshotCache removeObjectForKey:oldestBundleId];
+    }
+}
+
+-(UIInterfaceOrientation)cachedPresentationOrientationForBundleId:(NSString *)bundleId{
+    if (bundleId.length == 0) {
+        return UIInterfaceOrientationUnknown;
+    }
+    NSDictionary *entry = presentationSnapshotCache[bundleId];
+    if (!entry) {
+        return UIInterfaceOrientationUnknown;
+    }
+
+    ContextHostManager *manager = [ContextHostManager sharedInstance];
+    int currentPID = [manager processIdentifierForBundleId:bundleId];
+    int cachedPID = [entry[@"pid"] intValue];
+    FBScene *cachedScene = entry[@"scene"] == NSNull.null ? nil : entry[@"scene"];
+    FBScene *currentScene = currentPID > 0 ? [manager probeSceneForBundleId:bundleId] : nil;
+    if (currentPID <= 0 || cachedPID <= 0 || currentPID != cachedPID ||
+        !currentScene || (cachedScene && currentScene != cachedScene)) {
+        [presentationSnapshotCache removeObjectForKey:bundleId];
+        [presentationSnapshotCacheOrder removeObject:bundleId];
+        return UIInterfaceOrientationUnknown;
+    }
+
+    UIInterfaceOrientation orientation = [entry[@"orientation"] integerValue];
+    return POIsConcretePresentationOrientation(orientation)
+        ? orientation
+        : UIInterfaceOrientationUnknown;
+}
+
+-(UIInterfaceOrientation)resolvedHostedOrientationForBundleId:(NSString *)bundleId
+                                                     manager:(ContextHostManager *)manager{
+    ContextHostManager *hostManager = manager ?: [ContextHostManager sharedInstance];
+    UIInterfaceOrientation liveOrientation = hostManager.hostedInterfaceOrientation;
+    if (hostManager.isForegroundLeaseActive &&
+        [hostManager.activeHostedBundleId isEqualToString:bundleId] &&
+        POIsConcretePresentationOrientation(liveOrientation)) {
+        return liveOrientation;
+    }
+    if (!hostManager.isForegroundLeaseActive &&
+        [self hasLiveRetainedPresentationForBundleId:bundleId] &&
+        POIsConcretePresentationOrientation(presentationOrientation)) {
+        return presentationOrientation;
+    }
+    UIInterfaceOrientation cachedOrientation = [self cachedPresentationOrientationForBundleId:bundleId];
+    if (POIsConcretePresentationOrientation(cachedOrientation)) {
+        return cachedOrientation;
+    }
+    return [hostManager preferredHostedInterfaceOrientationForBundleId:bundleId];
+}
+
+-(NSDictionary *)validCachedPresentationSnapshotForBundleId:(NSString *)bundleId{
+    NSDictionary *entry = presentationSnapshotCache[bundleId];
+    NSString *frontId = [POApplicationHelper frontMostBundleId];
+    if (frontId.length > 0 && [frontId isEqualToString:bundleId]) {
+        return nil;
+    }
+    UIInterfaceOrientation cachedOrientation = [self cachedPresentationOrientationForBundleId:bundleId];
+    entry = presentationSnapshotCache[bundleId];
+    if (!entry || !POIsConcretePresentationOrientation(cachedOrientation)) {
+        return nil;
+    }
+    CGSize cachedSize = [entry[@"size"] CGSizeValue];
+    CGSize expectedSize = self.contentView.bounds.size;
+    UIInterfaceOrientation expectedOrientation =
+        [self resolvedHostedOrientationForBundleId:bundleId manager:nil];
+    if (fabs(cachedSize.width - expectedSize.width) > CLOSED_CONTENT_OFFSET_EPSILON ||
+        fabs(cachedSize.height - expectedSize.height) > CLOSED_CONTENT_OFFSET_EPSILON ||
+        cachedOrientation != expectedOrientation) {
+        return nil;
+    }
+    return entry;
+}
+
+-(BOOL)revealCachedPresentationSnapshotForBundleId:(NSString *)bundleId{
+    NSDictionary *entry = [self validCachedPresentationSnapshotForBundleId:bundleId];
+    UIView *snapshotView = entry[@"view"];
+    if (!snapshotView) {
+        return NO;
+    }
+    [self clearPresentationSnapshot];
+    presentationSnapshotView = snapshotView;
+    presentationSnapshotBundleId = [bundleId copy];
+    presentationSnapshotSceneIdentity = entry[@"scene"] == NSNull.null ? nil : entry[@"scene"];
+    presentationSnapshotIsTargetPlaceholder = NO;
+    presentationSnapshotCapturedLeftHanded = [entry[@"leftHanded"] boolValue];
+    presentationSnapshotSize = [entry[@"size"] CGSizeValue];
+    presentationSnapshotOrientation = [entry[@"orientation"] integerValue];
+    presentationSnapshotRenderSourceOrientation = presentationSnapshotOrientation;
+    [self layoutPresentationSnapshotView];
+    presentationSnapshotView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    presentationSnapshotView.hidden = NO;
+    if (presentationSnapshotView.superview != self.contentView) {
+        [self.contentView addSubview:presentationSnapshotView];
+    }
+    [self.contentView bringSubviewToFront:presentationSnapshotView];
+    [presentationSnapshotCacheOrder removeObject:bundleId];
+    [presentationSnapshotCacheOrder addObject:bundleId];
+    return YES;
+}
+
+-(void)showTargetTransitionPresentationForBundleId:(NSString *)bundleId{
+    if (bundleId.length == 0) {
+        return;
+    }
+    [self clearPresentationSnapshot];
+
+    UIView *placeholder = [[UIView alloc] initWithFrame:self.contentView.bounds];
+    placeholder.backgroundColor = [UIColor systemGray6Color];
+    placeholder.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+
+    UIImageView *iconView = [[UIImageView alloc] initWithImage:[POApplicationHelper imageForBundleId:bundleId]];
+    CGFloat iconSide = MIN(72.0, MIN(CGRectGetWidth(placeholder.bounds), CGRectGetHeight(placeholder.bounds)) * 0.24);
+    iconView.bounds = CGRectMake(0, 0, iconSide, iconSide);
+    iconView.center = CGPointMake(CGRectGetMidX(placeholder.bounds), CGRectGetMidY(placeholder.bounds));
+    iconView.contentMode = UIViewContentModeScaleAspectFit;
+    iconView.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin |
+        UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin;
+    [placeholder addSubview:iconView];
+
+    presentationSnapshotView = placeholder;
+    presentationSnapshotBundleId = [bundleId copy];
+    presentationSnapshotSceneIdentity = [[ContextHostManager sharedInstance] probeSceneForBundleId:bundleId];
+    presentationSnapshotIsTargetPlaceholder = YES;
+    presentationSnapshotCapturedLeftHanded = [[POApplicationHelper settings][@"leftHanded"] boolValue];
+    presentationSnapshotSize = self.contentView.bounds.size;
+    presentationSnapshotOrientation =
+        [self resolvedHostedOrientationForBundleId:bundleId manager:nil];
+    presentationSnapshotRenderSourceOrientation = presentationSnapshotOrientation;
+    [self.contentView addSubview:presentationSnapshotView];
+    [self layoutPresentationSnapshotView];
+    [self.contentView bringSubviewToFront:presentationSnapshotView];
+}
+
+-(void)retainPresentationAfterReleaseIfPossible{
+    BOOL canRetain = contextView != nil && presentationBundleId.length > 0;
+    presentationRetainedAfterRelease = canRetain;
+    retainedPresentationProcessPID = canRetain
+        ? [[ContextHostManager sharedInstance] processIdentifierForBundleId:presentationBundleId]
+        : 0;
+    if (retainedPresentationProcessPID <= 0) {
+        presentationRetainedAfterRelease = NO;
+        retainedPresentationProcessPID = 0;
+    }
+}
+
+-(BOOL)hasLiveRetainedPresentationForBundleId:(NSString *)bundleId{
+    if (!presentationRetainedAfterRelease || retainedPresentationProcessPID <= 0 ||
+        bundleId.length == 0 || ![presentationBundleId isEqualToString:bundleId]) {
+        return NO;
+    }
+    int currentPID = [[ContextHostManager sharedInstance] processIdentifierForBundleId:bundleId];
+    if (currentPID != retainedPresentationProcessPID) {
+        presentationRetainedAfterRelease = NO;
+        retainedPresentationProcessPID = 0;
+        return NO;
+    }
+    return YES;
+}
+
+-(void)flushDeferredRuntimeScenePublicationIfNeeded{
+    FBScene *scene = deferredRuntimePublishedScene;
+    UIView *sceneStack = deferredRuntimePublishedSceneStack;
+    NSString *bundleId = [deferredRuntimePublishedBundleId copy];
+    NSUInteger generation = deferredRuntimePublishedGeneration;
+
+    deferredRuntimePublishedScene = nil;
+    deferredRuntimePublishedSceneStack = nil;
+    deferredRuntimePublishedBundleId = nil;
+    deferredRuntimePublishedGeneration = 0;
+
+    if (!scene || !sceneStack || bundleId.length == 0 || generation == 0 ||
+        generation != hostSession.currentGeneration ||
+        ![bundleId isEqualToString:hostSession.requestedBundleId] ||
+        panelState == POPanelStateClosed || panelState == POPanelStateClosing) {
+        return;
+    }
+    [self hostSessionController:hostSession
+               didPublishScene:scene
+                    sceneStack:sceneStack
+                          bundleId:bundleId
+                        generation:generation];
+}
+
+-(void)scheduleRuntimeScenePublicationStagingIfNeeded{
+    if (runtimeDeferredPublicationStageScheduled || !runtimeHostedCategoryTransitionAnimating ||
+        !runtimeCategoryTransitionSnapshotActive || !presentationSnapshotView ||
+        presentationSnapshotView.hidden) {
+        return;
+    }
+
+    runtimeDeferredPublicationStageScheduled = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self->runtimeDeferredPublicationStageScheduled = NO;
+        if (!self->runtimeHostedCategoryTransitionAnimating ||
+            !self->runtimeCategoryTransitionSnapshotActive ||
+            !self->presentationSnapshotView || self->presentationSnapshotView.hidden) {
+            return;
+        }
+
+        FBScene *scene = self->deferredRuntimePublishedScene;
+        UIView *sceneStack = self->deferredRuntimePublishedSceneStack;
+        NSString *bundleId = [self->deferredRuntimePublishedBundleId copy];
+        NSUInteger generation = self->deferredRuntimePublishedGeneration;
+        if (!scene || !sceneStack || bundleId.length == 0 || generation == 0 ||
+            generation != self->hostSession.currentGeneration ||
+            ![bundleId isEqualToString:self->hostSession.requestedBundleId]) {
+            return;
+        }
+
+        self->runtimeScenePublicationStaging = YES;
+        [self hostSessionController:self->hostSession
+                   didPublishScene:scene
+                        sceneStack:sceneStack
+                          bundleId:bundleId
+                        generation:generation];
+        self->runtimeScenePublicationStaging = NO;
+
+        if (self->deferredRuntimePublishedSceneStack == sceneStack &&
+            self->deferredRuntimePublishedGeneration == generation) {
+            self->deferredRuntimePublishedScene = nil;
+            self->deferredRuntimePublishedSceneStack = nil;
+            self->deferredRuntimePublishedBundleId = nil;
+            self->deferredRuntimePublishedGeneration = 0;
+        }
+    });
+}
+
+-(BOOL)hasCompatiblePresentationSnapshotForBundleId:(NSString *)bundleId{
+    if (bundleId.length == 0 || !presentationSnapshotView ||
+        ![presentationSnapshotBundleId isEqualToString:bundleId]) {
+        return NO;
+    }
+    NSString *frontId = [POApplicationHelper frontMostBundleId];
+    if (frontId.length > 0 && [frontId isEqualToString:bundleId]) {
+        return NO;
+    }
+    ContextHostManager *manager = [ContextHostManager sharedInstance];
+    if (![manager isProcessRunningForBundleId:bundleId]) {
+        return NO;
+    }
+    FBScene *currentScene = [manager probeSceneForBundleId:bundleId];
+    if (!currentScene || (presentationSnapshotSceneIdentity && currentScene != presentationSnapshotSceneIdentity)) {
+        return NO;
+    }
+    CGSize expectedSize = self.contentView.bounds.size;
+    UIInterfaceOrientation expectedOrientation = [self contextManagerPreferredHostedInterfaceOrientation:nil];
+    return fabs(presentationSnapshotSize.width - expectedSize.width) <= CLOSED_CONTENT_OFFSET_EPSILON &&
+        fabs(presentationSnapshotSize.height - expectedSize.height) <= CLOSED_CONTENT_OFFSET_EPSILON &&
+        presentationSnapshotOrientation == expectedOrientation;
+}
+
+-(BOOL)prepareRuntimeCategoryTransitionSnapshotFromSourceOrientation:(UIInterfaceOrientation)sourceOrientation{
+    if (!contextView || contextView.hidden || presentationBundleId.length == 0 ||
+        !POIsConcretePresentationOrientation(sourceOrientation) ||
+        ![presentationBundleId isEqualToString:hostSession.activeBundleId]) {
+        return NO;
+    }
+
+    UIImage *snapshotImage = [[ContextHostManager sharedInstance]
+        captureSnapshotImageForActiveBundleId:presentationBundleId
+                             sourceOrientation:sourceOrientation];
+    if (!snapshotImage) {
+        return NO;
+    }
+
+    [self clearPresentationSnapshot];
+    UIView *snapshotView = [[UIView alloc] initWithFrame:self.contentView.bounds];
+    snapshotView.backgroundColor = UIColor.clearColor;
+    snapshotView.userInteractionEnabled = NO;
+    snapshotView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+
+    UIImageView *sourceImageView = [[UIImageView alloc] initWithImage:snapshotImage];
+    sourceImageView.contentMode = UIViewContentModeScaleToFill;
+    sourceImageView.bounds = contextView.bounds;
+    sourceImageView.center = contextView.center;
+    sourceImageView.transform = contextView.transform;
+    [snapshotView addSubview:sourceImageView];
+
+    presentationSnapshotView = snapshotView;
+    presentationSnapshotBundleId = [presentationBundleId copy];
+    presentationSnapshotSceneIdentity = presentationSceneIdentity;
+    presentationSnapshotIsTargetPlaceholder = NO;
+    presentationSnapshotCapturedLeftHanded = [[POApplicationHelper settings][@"leftHanded"] boolValue];
+    runtimeCategoryTransitionSnapshotActive = YES;
+    presentationSnapshotSize = self.contentView.bounds.size;
+    presentationSnapshotOrientation = sourceOrientation;
+    presentationSnapshotRenderSourceOrientation = sourceOrientation;
+    [self.contentView addSubview:presentationSnapshotView];
+    presentationSnapshotView.hidden = NO;
+    [self.contentView bringSubviewToFront:presentationSnapshotView];
+    return YES;
+}
+
+-(void)retargetRuntimeCategoryTransitionSnapshotForOrientation:(UIInterfaceOrientation)orientation{
+    if (!presentationSnapshotView || presentationSnapshotIsTargetPlaceholder ||
+        !POIsConcretePresentationOrientation(orientation) || !contextView) {
+        return;
+    }
+    UIView *sourceView = presentationSnapshotView.subviews.firstObject;
+    if (![sourceView isKindOfClass:[UIImageView class]]) {
+        return;
+    }
+
+    if (!POIsConcretePresentationOrientation(presentationSnapshotRenderSourceOrientation)) {
+        presentationSnapshotRenderSourceOrientation = presentationSnapshotOrientation;
+    }
+    presentationSnapshotOrientation = orientation;
+    [self layoutPresentationSnapshotView];
+    presentationSnapshotSize = self.contentView.bounds.size;
+    [self cachePresentationSnapshotView:presentationSnapshotView
+                               bundleId:presentationSnapshotBundleId
+                                  scene:presentationSnapshotSceneIdentity
+                                   size:presentationSnapshotSize
+                            orientation:presentationSnapshotOrientation
+                     capturedLeftHanded:presentationSnapshotCapturedLeftHanded];
+    presentationSnapshotView.hidden = NO;
+    [self.contentView bringSubviewToFront:presentationSnapshotView];
+}
+
+-(void)capturePresentationSnapshotIfPossible{
+    if (!contextView || contextView.hidden || showingCantHost || self.contentView.bounds.size.width <= 0 ||
+        self.contentView.bounds.size.height <= 0 ||
+        ![presentationBundleId isEqualToString:hostSession.activeBundleId]) {
+        return;
+    }
+
+    CGSize expectedCanvasSize = [self contextManagerPreferredSceneStackSize:nil];
+    UIInterfaceOrientation expectedOrientation = [self contextManagerPreferredHostedInterfaceOrientation:nil];
+    BOOL presentationContractMatches = presentationOrientation == expectedOrientation &&
+        fabs(presentationCanvasSize.width - expectedCanvasSize.width) <= CLOSED_CONTENT_OFFSET_EPSILON &&
+        fabs(presentationCanvasSize.height - expectedCanvasSize.height) <= CLOSED_CONTENT_OFFSET_EPSILON;
+    if (!presentationContractMatches) {
+        return;
+    }
+
+    CGSize size = self.contentView.bounds.size;
+    UIImage *snapshotImage = [[ContextHostManager sharedInstance]
+        captureSnapshotImageForActiveBundleId:presentationBundleId];
+    if (!snapshotImage) {
+        return;
+    }
+    UIView *snapshotView = [[UIView alloc] initWithFrame:self.contentView.bounds];
+    snapshotView.backgroundColor = UIColor.clearColor;
+    snapshotView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    UIImageView *sourceImageView = [[UIImageView alloc] initWithImage:snapshotImage];
+    sourceImageView.contentMode = UIViewContentModeScaleToFill;
+    sourceImageView.bounds = contextView.bounds;
+    sourceImageView.center = contextView.center;
+    sourceImageView.transform = contextView.transform;
+    [snapshotView addSubview:sourceImageView];
+
+    [self clearPresentationSnapshot];
+    presentationSnapshotView = snapshotView;
+    presentationSnapshotView.hidden = YES;
+    [self.contentView addSubview:presentationSnapshotView];
+    presentationSnapshotBundleId = [presentationBundleId copy];
+    presentationSnapshotSceneIdentity = presentationSceneIdentity;
+    presentationSnapshotIsTargetPlaceholder = NO;
+    presentationSnapshotCapturedLeftHanded = [[POApplicationHelper settings][@"leftHanded"] boolValue];
+    presentationSnapshotSize = size;
+    presentationSnapshotOrientation = presentationOrientation;
+    presentationSnapshotRenderSourceOrientation = presentationOrientation;
+    [self cachePresentationSnapshotView:snapshotView
+                               bundleId:presentationSnapshotBundleId
+                                  scene:presentationSnapshotSceneIdentity
+                               size:presentationSnapshotSize
+                            orientation:presentationSnapshotOrientation
+                     capturedLeftHanded:presentationSnapshotCapturedLeftHanded];
+}
+
+-(BOOL)isPresentationCompatibleForBundleId:(NSString *)bundleId{
+    if (bundleId.length == 0 || !contextView || ![presentationBundleId isEqualToString:bundleId]) {
+        return NO;
+    }
+    if (presentationRetainedAfterRelease &&
+        ![self hasLiveRetainedPresentationForBundleId:bundleId]) {
+        return NO;
+    }
+    if (presentationSceneIdentity &&
+        [presentationSceneIdentity respondsToSelector:@selector(isValid)] &&
+        ![(id)presentationSceneIdentity isValid]) {
+        return NO;
+    }
+    NSString *frontId = [POApplicationHelper frontMostBundleId];
+    if (frontId.length > 0 && [frontId isEqualToString:bundleId]) {
+        return NO;
+    }
+    CGSize expectedSize = [self contextManagerPreferredSceneStackSize:nil];
+    UIInterfaceOrientation expectedOrientation = [self contextManagerPreferredHostedInterfaceOrientation:nil];
+    return fabs(presentationCanvasSize.width - expectedSize.width) <= CLOSED_CONTENT_OFFSET_EPSILON &&
+        fabs(presentationCanvasSize.height - expectedSize.height) <= CLOSED_CONTENT_OFFSET_EPSILON &&
+        presentationOrientation == expectedOrientation;
+}
+
+-(BOOL)revealPresentationForBundleIdIfCompatible:(NSString *)bundleId{
+    keyboardZoomContainer.hidden = NO;
+    if (cantHostCanvas) {
+        cantHostCanvas.hidden = YES;
+    }
+    BOOL compatible = [self isPresentationCompatibleForBundleId:bundleId];
+    BOOL snapshotCompatible = [self hasCompatiblePresentationSnapshotForBundleId:bundleId];
+    if (compatible && presentationRetainedAfterRelease) {
+        presentationRetainedAfterRelease = NO;
+        retainedPresentationProcessPID = 0;
+    }
+    if (contextView) {
+        contextView.hidden = !compatible;
+        if (compatible) {
+            [self.contentView bringSubviewToFront:contextView];
+        }
+    }
+    if (presentationSnapshotView) {
+        presentationSnapshotView.hidden = !snapshotCompatible;
+        if (snapshotCompatible) {
+            [self layoutPresentationSnapshotView];
+            [self.contentView bringSubviewToFront:presentationSnapshotView];
+        }
+    }
+    return compatible || snapshotCompatible;
+}
+
+-(void)hidePresentationContainer{
+    keyboardZoomContainer.hidden = YES;
+    if (contextView) {
+        contextView.hidden = NO;
+    }
+}
+
+-(void)issueInteractiveHostIntentIfNeeded{
+    if (interactiveHostIntentIssued || pinnedBundleId.length == 0) {
+        return;
+    }
+    interactiveHostIntentIssued = YES;
+    BOOL revealed = [self revealPresentationForBundleIdIfCompatible:pinnedBundleId];
+    if (!revealed) {
+        [self showTargetTransitionPresentationForBundleId:pinnedBundleId];
+    }
+    [hostSession activateBundleId:pinnedBundleId];
+}
+
+-(void)beginSplitSessionIfNeeded{
+    POSplitSessionController *splitSession = [POSplitSessionController sharedInstance];
+    if (splitSession.isActive) {
+        return;
+    }
+    NSString *baseBundleId = [POApplicationHelper frontMostBundleId];
+    if (baseBundleId.length > 0 && [baseBundleId isEqualToString:pinnedBundleId]) {
+        return;
+    }
+    id baseScene = nil;
+    if (baseBundleId.length > 0) {
+        baseScene = [[ContextHostManager sharedInstance] probeSceneForBundleId:baseBundleId];
+    } else {
+        baseBundleId = @"com.apple.springboard";
+        SEL mainDisplaySceneSelector = NSSelectorFromString(@"_mainDisplayWindowScene");
+        if ([UIApplication.sharedApplication respondsToSelector:mainDisplaySceneSelector]) {
+            baseScene = ((id (*)(id, SEL))objc_msgSend)(UIApplication.sharedApplication,
+                                                       mainDisplaySceneSelector);
+        }
+        if (!baseScene) {
+            for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+                if ([scene isKindOfClass:[UIWindowScene class]] &&
+                    [scene.session.persistentIdentifier isEqualToString:baseBundleId]) {
+                    baseScene = scene;
+                    break;
+                }
+            }
+        }
+    }
+    [splitSession beginWithBaseBundleIdentifier:baseBundleId scene:baseScene];
+}
+
 -(BOOL)isLandscapePanelFullyOpenAndIdle{
     CGRect bounds = self.view.bounds;
-    if (CGRectGetWidth(bounds) <= CGRectGetHeight(bounds) || !self.isOpened) {
+    if (CGRectGetWidth(bounds) <= CGRectGetHeight(bounds) || ![self isPanelFullyOpen]) {
         return NO;
     }
     if (scrollSnapAnimationInProgress || scrollView.dragging || scrollView.decelerating) {
@@ -335,12 +1431,27 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
     return fabs(scrollView.contentOffset.x - [self maximumContentOffsetX]) <= CLOSED_CONTENT_OFFSET_EPSILON;
 }
 
--(CGFloat)effectiveKeyboardZoomScale{
+-(POCardScaleContext)currentCardScaleContext{
+    UIInterfaceOrientation hostedOrientation = [self resolvedHostedLayoutOrientation];
+    if (!POIsConcretePresentationOrientation(hostedOrientation)) {
+        return POCardScaleContextNone;
+    }
+    CGRect bounds = self.view.bounds;
+    BOOL shellIsLandscape = CGRectGetWidth(bounds) > CGRectGetHeight(bounds);
+    BOOL hostedIsLandscape = UIInterfaceOrientationIsLandscape(hostedOrientation);
+    if (shellIsLandscape && !hostedIsLandscape) {
+        return POCardScaleContextLandscapeShellPortraitHosted;
+    }
+    return POCardScaleContextNone;
+}
+
+-(CGFloat)effectiveLandscapePortraitKeyboardZoomScale{
     if (CGRectGetWidth(keyboardZoomBaseFrame) <= 0 || CGRectGetHeight(keyboardZoomBaseFrame) <= 0) {
         return 1.0;
     }
     CGRect baseFrameInView = [scrollView convertRect:keyboardZoomBaseFrame toView:self.view];
-    CGFloat leadingLimit = [self leadingSafeAreaInset] + CONTENT_EDGE_GAP;
+    CGFloat leadingLimit = [self leadingSafeAreaInset] + CONTENT_EDGE_GAP +
+        CGRectGetWidth(self.handle.bounds) + HANDLE_EDGE_GAP;
     CGFloat availableWidth = CGRectGetMaxX(baseFrameInView) - leadingLimit;
     CGFloat maxZoomByWidth = availableWidth / CGRectGetWidth(keyboardZoomBaseFrame);
     if (!isfinite(maxZoomByWidth)) {
@@ -350,21 +1461,65 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
     return MAX(1.0, MIN(PO_KEYBOARD_ZOOM_REQUESTED_SCALE, zoom));
 }
 
--(BOOL)shouldApplyKeyboardZoom{
-    // Keep the landscape keyboard enlargement opt-in.  It is useful on some
-    // iPhone layouts, but iPad already has enough keyboard space and should
-    // not be forced through this transform.
-    if (![[POApplicationHelper settings][@"landscapeKeyboardZoom"] boolValue]) {
+-(BOOL)canApplyCardScale{
+    if (![self isPanelFullyOpen] || contextView == nil || contextView.hidden ||
+        keyboardZoomContainer.hidden || hostedCategoryTransitionPending ||
+        runtimeHostedCategoryTransitionAnimating ||
+        keyboardZoomSuspensionReasons != POKeyboardZoomSuspensionNone ||
+        CGRectGetWidth(keyboardZoomBaseFrame) <= 0 || CGRectGetHeight(keyboardZoomBaseFrame) <= 0) {
         return NO;
     }
-    return [self isLandscapePanelFullyOpenAndIdle] &&
-           contextView != nil &&
-           keyboardNotificationState == POKeyboardNotificationStateVisible &&
-           !keyboardHideAnimationInFlight &&
-           keyboardZoomSuspensionReasons == POKeyboardZoomSuspensionNone &&
-           CGRectGetWidth(keyboardZoomBaseFrame) > 0 &&
-           CGRectGetHeight(keyboardZoomBaseFrame) > 0 &&
-           [self effectiveKeyboardZoomScale] >= PO_KEYBOARD_ZOOM_MINIMUM_USEFUL_SCALE;
+    return [self currentCardScaleContext] == POCardScaleContextLandscapeShellPortraitHosted;
+}
+
+-(BOOL)keyboardAutomaticScaleRequested{
+    if ([self currentCardScaleContext] != POCardScaleContextLandscapeShellPortraitHosted ||
+        keyboardZoomSuppressedForCurrentSession ||
+        ![[POApplicationHelper settings][@"landscapeKeyboardZoom"] boolValue]) {
+        return NO;
+    }
+    return hostedKeyboardLayerPresent &&
+        keyboardNotificationState == POKeyboardNotificationStateVisible &&
+        !keyboardHideAnimationInFlight;
+}
+
+-(CGFloat)keyboardZoomScaleForCardScaleContext:(POCardScaleContext)context{
+    if (context != POCardScaleContextLandscapeShellPortraitHosted) {
+        return 1.0;
+    }
+    CGFloat scaleValue = [self effectiveLandscapePortraitKeyboardZoomScale];
+    return scaleValue >= PO_KEYBOARD_ZOOM_MINIMUM_USEFUL_SCALE ? scaleValue : 1.0;
+}
+
+-(CGFloat)resolvedCardScale{
+    BOOL closingScaleFrozen = panelState == POPanelStateClosing ||
+        (keyboardZoomSuspensionReasons & POKeyboardZoomSuspensionClosing) != 0;
+    if (closingScaleFrozen && !keyboardZoomContainer.hidden) {
+        CGFloat frozenScale = isfinite(closingFrozenCardScale) && closingFrozenCardScale > 0
+            ? closingFrozenCardScale
+            : appliedCardScale;
+        return isfinite(frozenScale) && frozenScale > 0 ? frozenScale : 1.0;
+    }
+    if (![self canApplyCardScale]) {
+        return 1.0;
+    }
+    POCardScaleContext context = [self currentCardScaleContext];
+    if ([self keyboardAutomaticScaleRequested]) {
+        return [self keyboardZoomScaleForCardScaleContext:context];
+    }
+    return 1.0;
+}
+
+-(BOOL)shouldApplyKeyboardZoom{
+    return [self currentCardScaleContext] == POCardScaleContextLandscapeShellPortraitHosted &&
+        [self resolvedCardScale] > 1.0 + PO_CARD_SCALE_EPSILON;
+}
+
+-(CGFloat)handleCompanionTranslationXForScale:(CGFloat)scaleValue{
+    if (fabs(scaleValue - 1.0) <= PO_CARD_SCALE_EPSILON || CGRectIsEmpty(keyboardZoomBaseFrame)) {
+        return 0;
+    }
+    return CGRectGetWidth(keyboardZoomBaseFrame) * (1.0 - scaleValue);
 }
 
 -(CGPoint)keyboardZoomTargetCenterForBaseFrame:(CGRect)baseFrame scale:(CGFloat)zoom{
@@ -390,10 +1545,6 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
         ((UIViewAnimationOptions)curve << 16);
 }
 
-// A frame-change notification is itself a positive keyboard signal. Only an
-// explicitly empty frame is treated as hidden; coordinate conversion is not
-// used here because SpringBoard can publish one frame in the pre-rotation
-// coordinate space. WillHide/DidHide remain the authoritative hide signals.
 -(BOOL)keyboardFrameHasNonzeroSizeInNotification:(NSNotification *)notification{
     NSValue *frameValue = notification.userInfo[UIKeyboardFrameEndUserInfoKey];
     if (![frameValue isKindOfClass:[NSValue class]]) {
@@ -409,118 +1560,187 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
     return [self keyboardFrameHasNonzeroSizeInNotification:notification];
 }
 
--(void)applyKeyboardZoomAnimated:(BOOL)animated{
-    if (![self shouldApplyKeyboardZoom]) {
-        [self restoreKeyboardZoomAnimated:animated];
-        return;
-    }
-
-    CGFloat zoom = [self effectiveKeyboardZoomScale];
-    if (zoom < PO_KEYBOARD_ZOOM_MINIMUM_USEFUL_SCALE) {
-        [self restoreKeyboardZoomAnimated:animated];
-        return;
-    }
-
-    CGPoint targetCenter = [self keyboardZoomTargetCenterForBaseFrame:keyboardZoomBaseFrame scale:zoom];
-    NSUInteger generation = ++keyboardZoomGeneration;
-    void (^changes)(void) = ^{
-        keyboardZoomContainer.transform = CGAffineTransformMakeScale(zoom, zoom);
-        keyboardZoomContainer.center = targetCenter;
-    };
-    keyboardZoomApplied = YES;
-    if (animated) {
-        [UIView animateWithDuration:lastKeyboardAnimationDuration
-                              delay:0
-                            options:lastKeyboardAnimationOptions
-                         animations:changes
-                         completion:^(__unused BOOL finished) {
-            if (generation != self->keyboardZoomGeneration) {
-                return;
-            }
-        }];
-    } else {
-        [UIView performWithoutAnimation:changes];
-    }
+-(NSTimeInterval)cardScaleAnimationDurationForSource:(POCardScaleTransitionSource)source{
+    return source == POCardScaleTransitionSourceKeyboard
+        ? lastKeyboardAnimationDuration
+        : PO_HANDLE_CARD_SCALE_ANIMATION_DURATION;
 }
 
--(void)restoreKeyboardZoomAnimated:(BOOL)animated{
-    if (!keyboardZoomApplied && CGAffineTransformEqualToTransform(keyboardZoomContainer.transform,
-                                                                    CGAffineTransformIdentity)) {
-        return;
+-(UIViewAnimationOptions)cardScaleAnimationOptionsForSource:(POCardScaleTransitionSource)source{
+    if (source == POCardScaleTransitionSourceKeyboard) {
+        return lastKeyboardAnimationOptions;
+    }
+    return UIViewAnimationOptionBeginFromCurrentState |
+        UIViewAnimationOptionAllowUserInteraction |
+        UIViewAnimationOptionCurveEaseInOut;
+}
+
+-(void)reconcileCardChromeZOrder{
+    [scrollView bringSubviewToFront:handleScrollView];
+}
+
+-(void)applyCardScaleTarget:(CGFloat)targetScale
+                   animated:(BOOL)animated
+                     source:(POCardScaleTransitionSource)source{
+    if (!isfinite(targetScale) || targetScale <= 0) {
+        targetScale = 1.0;
+    }
+    BOOL targetIsBase = fabs(targetScale - 1.0) <= PO_CARD_SCALE_EPSILON;
+    if (targetIsBase) {
+        targetScale = 1.0;
     }
 
-    NSUInteger generation = ++keyboardZoomGeneration;
-    // QuickSwitch owns a temporary horizontal yield. Keyboard state changes
-    // must remove only the zoom transform and preserve that menu-avoidance
-    // translation, otherwise a late keyboard notification makes the menu
-    // overlap the card for one frame.
     CGRect baseFrame = quickSwitchYieldActive && !CGRectIsEmpty(quickSwitchSavedContainerFrame)
         ? quickSwitchSavedContainerFrame
         : keyboardZoomBaseFrame;
+    CGPoint targetCenter = targetIsBase
+        ? CGPointMake(CGRectGetMidX(baseFrame), CGRectGetMidY(baseFrame))
+        : [self keyboardZoomTargetCenterForBaseFrame:keyboardZoomBaseFrame scale:targetScale];
+    CGFloat handleTranslationX = targetIsBase ? 0 : [self handleCompanionTranslationXForScale:targetScale];
+    POInteractionMode interactionMode = [self currentInteractionMode];
+    CGFloat panelBackdropTargetAlpha = interactionMode == POInteractionModeDrawerModal
+        ? 0.5 * [self horizontalOpenProgress]
+        : 0;
+
+    CGAffineTransform modelTransform = keyboardZoomContainer.transform;
+    BOOL cardTransformMatches = targetIsBase
+        ? CGAffineTransformEqualToTransform(modelTransform, CGAffineTransformIdentity)
+        : fabs(modelTransform.a - targetScale) <= PO_CARD_SCALE_EPSILON &&
+          fabs(modelTransform.d - targetScale) <= PO_CARD_SCALE_EPSILON &&
+          fabs(modelTransform.b) <= PO_CARD_SCALE_EPSILON && fabs(modelTransform.c) <= PO_CARD_SCALE_EPSILON;
+    BOOL handleTransformMatches = fabs(handleScrollView.transform.tx - handleTranslationX) <= 0.25 &&
+        fabs(handleScrollView.transform.ty) <= 0.25;
+    BOOL backdropMatches = fabs(panelBackdropView.alpha - panelBackdropTargetAlpha) <= 0.001;
+    if (fabs(appliedCardScale - targetScale) <= PO_CARD_SCALE_EPSILON &&
+        cardTransformMatches && handleTransformMatches && backdropMatches) {
+        keyboardZoomApplied = !targetIsBase;
+        [self reconcileCardChromeZOrder];
+        return;
+    }
+
+    NSUInteger generation = ++keyboardZoomGeneration;
+    keyboardZoomApplied = !targetIsBase;
+    appliedCardScale = targetScale;
+    [self reconcileCardChromeZOrder];
+
     void (^changes)(void) = ^{
-        keyboardZoomContainer.transform = CGAffineTransformIdentity;
+        self->keyboardZoomContainer.transform = targetIsBase
+            ? CGAffineTransformIdentity
+            : CGAffineTransformMakeScale(targetScale, targetScale);
         if (!CGRectIsEmpty(baseFrame)) {
-            keyboardZoomContainer.frame = baseFrame;
+            self->keyboardZoomContainer.center = targetCenter;
         }
+        self->handleScrollView.transform = CGAffineTransformMakeTranslation(handleTranslationX, 0);
+        self->panelBackdropView.alpha = panelBackdropTargetAlpha;
     };
-    keyboardZoomApplied = NO;
+
+    void (^completion)(__unused BOOL finished) = ^(__unused BOOL finished) {
+        if (generation != self->keyboardZoomGeneration) {
+            return;
+        }
+        if (targetIsBase && !CGRectIsEmpty(baseFrame)) {
+            [UIView performWithoutAnimation:^{
+                self->keyboardZoomContainer.transform = CGAffineTransformIdentity;
+                self->keyboardZoomContainer.frame = baseFrame;
+                self->handleScrollView.transform = CGAffineTransformIdentity;
+            }];
+        }
+        [self reconcileCardChromeZOrder];
+    };
+
     if (animated) {
-        [UIView animateWithDuration:lastKeyboardAnimationDuration
+        [UIView animateWithDuration:[self cardScaleAnimationDurationForSource:source]
                               delay:0
-                            options:lastKeyboardAnimationOptions
+                            options:[self cardScaleAnimationOptionsForSource:source]
                          animations:changes
-                         completion:^(__unused BOOL finished) {
-            if (generation != self->keyboardZoomGeneration) {
-                return;
-            }
-        }];
+                         completion:completion];
     } else {
         [UIView performWithoutAnimation:changes];
+        completion(YES);
     }
+}
+
+-(void)applyResolvedCardScaleAnimated:(BOOL)animated source:(POCardScaleTransitionSource)source{
+    [self applyCardScaleTarget:[self resolvedCardScale] animated:animated source:source];
+}
+
+-(void)applyKeyboardZoomAnimated:(BOOL)animated{
+    [self applyResolvedCardScaleAnimated:animated source:POCardScaleTransitionSourceKeyboard];
+}
+
+-(void)restoreKeyboardZoomAnimated:(BOOL)animated{
+    if (scaledProgrammaticCloseAnimating) {
+        return;
+    }
+    [self applyCardScaleTarget:1.0 animated:animated source:POCardScaleTransitionSourceReconcile];
 }
 
 -(void)restoreKeyboardZoomImmediately{
-    [self restoreKeyboardZoomAnimated:NO];
+    if (scaledProgrammaticCloseAnimating) {
+        return;
+    }
+    [self applyCardScaleTarget:1.0 animated:NO source:POCardScaleTransitionSourceReconcile];
+}
+
+-(void)reevaluateCardScaleAnimated:(BOOL)animated source:(POCardScaleTransitionSource)source{
+    UIGestureRecognizerState panState = scrollView.panGestureRecognizer.state;
+    BOOL scrollPanActive = panState == UIGestureRecognizerStateBegan ||
+        panState == UIGestureRecognizerStateChanged;
+    if (!scrollView.dragging && !scrollView.decelerating &&
+        !scrollSnapAnimationInProgress && !scrollPanActive && panelPanIntent == POPanelPanIntentNone) {
+        keyboardZoomSuspensionReasons &= ~POKeyboardZoomSuspensionDragging;
+    }
+    [self applyResolvedCardScaleAnimated:animated source:source];
 }
 
 -(void)reevaluateKeyboardZoomAnimated:(BOOL)animated{
-    UIGestureRecognizerState panState = scrollView.panGestureRecognizer.state;
-    BOOL panelPanActive = panState == UIGestureRecognizerStateBegan ||
-        panState == UIGestureRecognizerStateChanged;
-    // Defensive reconciliation for cancelled/no-op UIScrollView gestures.
-    // UIKit does not guarantee a matching end callback for every recognizer
-    // cancellation, so a stale Dragging bit must never become permanent.
-    if (!scrollView.dragging && !scrollView.decelerating &&
-        !scrollSnapAnimationInProgress && !panelPanActive) {
-        keyboardZoomSuspensionReasons &= ~POKeyboardZoomSuspensionDragging;
+    [self reevaluateCardScaleAnimated:animated source:POCardScaleTransitionSourceReconcile];
+}
+
+-(BOOL)shouldHandleTapRestoreKeyboardZoom{
+    if (panelState != POPanelStateOpen || [self isPanelTransitioning] ||
+        scrollView.dragging || scrollView.decelerating || presentedQuickSwitchMenu ||
+        self.handle.layoutMode != POHandleLayoutModeVerticalRail) {
+        return NO;
     }
-    if ([self shouldApplyKeyboardZoom]) {
-        [self applyKeyboardZoomAnimated:animated];
-    } else {
-        [self restoreKeyboardZoomAnimated:animated];
+    return [self keyboardAutomaticScaleRequested] &&
+        appliedCardScale > 1.0 + PO_CARD_SCALE_EPSILON;
+}
+
+-(void)restoreKeyboardZoomFromHandleTap{
+    if (![self shouldHandleTapRestoreKeyboardZoom]) {
+        return;
     }
+    keyboardZoomSuppressedForCurrentSession = YES;
+    [self applyResolvedCardScaleAnimated:YES source:POCardScaleTransitionSourceHandle];
 }
 
 -(void)addKeyboardZoomSuspension:(POKeyboardZoomSuspensionReason)reason{
+    if (reason == POKeyboardZoomSuspensionClosing) {
+        closingFrozenCardScale = isfinite(appliedCardScale) && appliedCardScale > 0
+            ? appliedCardScale
+            : 1.0;
+        keyboardZoomSuspensionReasons |= reason;
+        return;
+    }
     keyboardZoomSuspensionReasons |= reason;
-    [self restoreKeyboardZoomImmediately];
+    [self applyResolvedCardScaleAnimated:NO source:POCardScaleTransitionSourceReconcile];
 }
 
 -(void)removeKeyboardZoomSuspension:(POKeyboardZoomSuspensionReason)reason{
     keyboardZoomSuspensionReasons &= ~reason;
+    if (reason == POKeyboardZoomSuspensionClosing) {
+        closingFrozenCardScale = 1.0;
+    }
 }
 
-// UIScrollView can finish a no-op drag without starting a scrolling animation.
-// In that path the old code left POKeyboardZoomSuspensionDragging set forever,
-// which explains the intermittent "keyboard is visible but card stays small"
-// state after a light touch. Always clear the bit only after UIKit reports that
-// all three interaction flags are idle.
 -(void)finishPanelDragZoomIfIdle{
-    if (scrollView.dragging || scrollView.decelerating || scrollSnapAnimationInProgress) {
+    if (scrollView.dragging || scrollView.decelerating || scrollSnapAnimationInProgress ||
+        panelPanIntent != POPanelPanIntentNone) {
         return;
     }
     [self removeKeyboardZoomSuspension:POKeyboardZoomSuspensionDragging];
-    if (pendingOpenState && [self isLandscapePanelFullyOpenAndIdle]) {
+    if (pendingOpenState && [self isPanelFullyOpen]) {
         [self reevaluateKeyboardZoomAnimated:YES];
     }
 }
@@ -536,9 +1756,7 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
 }
 
 -(CGFloat)handleRailWidth{
-    // 最大尺寸下仍为把手保留完整轨道和两侧间距，避免外框超出滚动容器后
-    // 与卡片或快捷菜单的坐标计算脱节。
-    return MAX(HANDLE_MARGIN, CGRectGetWidth(self.handle.bounds) + HANDLE_EDGE_GAP * 2.0);
+    return CGRectGetWidth(self.handle.bounds) + HANDLE_EDGE_GAP * 2.0 + CONTENT_EDGE_GAP;
 }
 
 -(CGFloat)maximumHandleOffset{
@@ -550,6 +1768,9 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
 }
 
 -(void)storeHandlePosition{
+    if ([self isHorizontalQuickSwitchLayoutMode]) {
+        return;
+    }
     handlePoint = handleScrollView.contentOffset;
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     [defaults setValue:NSStringFromCGPoint(handlePoint) forKey:@"handlePoint"];
@@ -557,6 +1778,17 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
     if (maximumOffset > 0) {
         [defaults setDouble:(handlePoint.y / maximumOffset) forKey:@"handlePointRatio"];
     }
+}
+
+-(void)inheritVerticalHandleScreenY:(CGFloat)screenY{
+    if (self.handle.layoutMode != POHandleLayoutModeVerticalRail || !isfinite(screenY)) {
+        return;
+    }
+
+    CGFloat targetOffset = CGRectGetMinY(handleScrollView.frame) +
+        CGRectGetMinY(self.handle.frame) - screenY;
+    [handleScrollView setContentOffset:CGPointMake(0, [self clampedHandleOffset:targetOffset])
+                                animated:NO];
 }
 
 -(CGFloat)horizontalOpenProgress{
@@ -567,37 +1799,448 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
     return MIN(MAX(0, scrollView.contentOffset.x / maximumOffset), 1);
 }
 
-// 只有卡片实际回到闭合坐标、且没有拖动/减速/程序化吸附动画时，才允许把手
-// 进入快捷切换。isOpened 反映托管状态，不能单独作为视觉闭合状态使用。
+-(UIView *)beginHandleVisualHandoffSnapshot{
+    [self clearHandleVisualHandoff];
+
+    CGRect handleInView = [handleScrollView convertRect:self.handle.frame toView:self.view];
+    if (CGRectIsEmpty(handleInView) || !isfinite(CGRectGetMinX(handleInView)) ||
+        !isfinite(CGRectGetMinY(handleInView))) {
+        return nil;
+    }
+
+    UIView *snapshot = [self.handle snapshotViewAfterScreenUpdates:NO];
+    if (!snapshot) {
+        return nil;
+    }
+    snapshot.frame = handleInView;
+    snapshot.userInteractionEnabled = NO;
+    snapshot.alpha = MAX(self.handle.alpha, 0.02);
+    [self.view addSubview:snapshot];
+    [self.view bringSubviewToFront:snapshot];
+    handleVisualHandoffSnapshotView = snapshot;
+
+    self.handle.alpha = 0.02;
+    return snapshot;
+}
+
+-(void)clearHandleVisualHandoff{
+    handleVisualHandoffGeneration += 1;
+    [handleVisualHandoffSnapshotView.layer removeAllAnimations];
+    [handleVisualHandoffSnapshotView removeFromSuperview];
+    handleVisualHandoffSnapshotView = nil;
+    self.handle.alpha = 1;
+}
+
+-(void)completeHandleVisualHandoffFromSnapshot:(UIView *)snapshot{
+    if (!snapshot || snapshot != handleVisualHandoffSnapshotView) {
+        self.handle.alpha = 1;
+        return;
+    }
+
+    NSUInteger generation = handleVisualHandoffGeneration;
+    [UIView animateWithDuration:0.12
+                          delay:0
+                        options:(UIViewAnimationOptionCurveEaseOut |
+                                 UIViewAnimationOptionBeginFromCurrentState |
+                                 UIViewAnimationOptionAllowUserInteraction)
+                     animations:^{
+        snapshot.alpha = 0;
+        self.handle.alpha = 1;
+    } completion:^(BOOL finished) {
+        if (generation == self->handleVisualHandoffGeneration &&
+            snapshot == self->handleVisualHandoffSnapshotView) {
+            [snapshot removeFromSuperview];
+            self->handleVisualHandoffSnapshotView = nil;
+        }
+    }];
+}
+
+-(void)cancelRuntimeHostedCategoryTransition{
+    BOOL wasAnimating = runtimeHostedCategoryTransitionAnimating;
+    BOOL hadRuntimeBridge = runtimeCategoryTransitionSnapshotActive || runtimeCategoryTransitionSnapshotFading;
+    NSString *runtimeBridgeBundleId = hadRuntimeBridge ? [presentationSnapshotBundleId copy] : nil;
+    if (!wasAnimating && !hostedCategoryTransitionPending && !handleVisualHandoffSnapshotView &&
+        !hadRuntimeBridge) {
+        return;
+    }
+    if (wasAnimating) {
+        runtimeHostedCategoryTransitionGeneration += 1;
+        runtimeHostedCategoryTransitionAnimating = NO;
+        [keyboardZoomContainer.layer removeAllAnimations];
+        [panelBackdropView.layer removeAllAnimations];
+        [self.handle.layer removeAnimationForKey:@"po.runtimeRotationOpacity"];
+        [UIView performWithoutAnimation:^{
+            self->keyboardZoomContainer.transform = CGAffineTransformIdentity;
+            if (!CGRectIsEmpty(self->keyboardZoomBaseFrame)) {
+                self->keyboardZoomContainer.frame = self->keyboardZoomBaseFrame;
+            }
+        }];
+    }
+    hostedCategoryTransitionPending = NO;
+    [self clearHandleVisualHandoff];
+    if (hadRuntimeBridge) {
+        [self clearPresentationSnapshot];
+        if (runtimeBridgeBundleId.length > 0) {
+            [presentationSnapshotCache removeObjectForKey:runtimeBridgeBundleId];
+            [presentationSnapshotCacheOrder removeObject:runtimeBridgeBundleId];
+        }
+    }
+    if (wasAnimating) {
+        [self updateInteractionBackdropsAnimated:NO];
+        [self removeKeyboardZoomSuspension:POKeyboardZoomSuspensionRotation];
+        [self reevaluateKeyboardZoomAnimated:NO];
+        [self flushDeferredRuntimeScenePublicationIfNeeded];
+    }
+}
+
+-(BOOL)canAnimateRuntimeHostedCategoryTransitionFromOrientation:(UIInterfaceOrientation)fromOrientation
+                                                  toOrientation:(UIInterfaceOrientation)toOrientation{
+    if (panelState != POPanelStateOpen || !contextView || contextView.hidden ||
+        keyboardZoomContainer.hidden || presentationRetainedAfterRelease ||
+        panelPanIntent != POPanelPanIntentNone || scrollSnapAnimationInProgress ||
+        presentedQuickSwitchMenu || (quickSwitchInteractionOverlayView && !quickSwitchInteractionOverlayView.hidden)) {
+        return NO;
+    }
+    if (!POIsConcretePresentationOrientation(fromOrientation) ||
+        !POIsConcretePresentationOrientation(toOrientation) ||
+        UIInterfaceOrientationIsLandscape(fromOrientation) == UIInterfaceOrientationIsLandscape(toOrientation)) {
+        return NO;
+    }
+    if (![presentationBundleId isEqualToString:pinnedBundleId] ||
+        ![hostSession.activeBundleId isEqualToString:pinnedBundleId] ||
+        ![ContextHostManager sharedInstance].isForegroundLeaseActive) {
+        return NO;
+    }
+    return YES;
+}
+
+-(BOOL)beginRuntimeHostedCategoryTransitionFromOrientation:(UIInterfaceOrientation)fromOrientation
+                                             toOrientation:(UIInterfaceOrientation)toOrientation
+                                     startingBackdropAlpha:(CGFloat)startingBackdropAlpha
+                                  systemAnimationParameters:(id)animationParameters{
+    Class animatorClass = NSClassFromString(@"UIStatusBarAnimationParameters");
+    SEL animateSelector = NSSelectorFromString(@"animateWithParameters:fromCurrentState:animations:completion:");
+    if (!animationParameters || !animatorClass || ![animatorClass respondsToSelector:animateSelector] ||
+        ![self canAnimateRuntimeHostedCategoryTransitionFromOrientation:fromOrientation
+                                                           toOrientation:toOrientation]) {
+        return NO;
+    }
+
+    if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion == 15) {
+        return NO;
+    }
+
+    NSUInteger hostGeneration = hostSession.currentGeneration;
+    CGPoint oldScreenCenter = [scrollView convertPoint:keyboardZoomContainer.center toView:self.view];
+    CGSize oldBoundsSize = keyboardZoomContainer.bounds.size;
+    UIView *handleSnapshot = [self beginHandleVisualHandoffSnapshot];
+    [self applyLayoutPreservingHandlePosition:YES];
+    CGPoint finalCenter = keyboardZoomContainer.center;
+    CGPoint initialCenter = [self.view convertPoint:oldScreenCenter toView:scrollView];
+    CGSize finalBoundsSize = keyboardZoomContainer.bounds.size;
+    POInteractionMode finalInteractionMode = [self baseInteractionModeForHostedOrientation:toOrientation];
+    CGFloat finalBackdropAlpha = finalInteractionMode == POInteractionModeDrawerModal
+        ? 0.5 * [self horizontalOpenProgress]
+        : 0;
+    BOOL fadeInBackdropAfterRotation = UIInterfaceOrientationIsLandscape(fromOrientation) &&
+        !UIInterfaceOrientationIsLandscape(toOrientation) &&
+        finalInteractionMode == POInteractionModeDrawerModal && finalBackdropAlpha > 0.001;
+    CGFloat rotationBackdropAlpha = fadeInBackdropAfterRotation ? 0 : finalBackdropAlpha;
+
+    CGFloat rotatedFinalWidth = finalBoundsSize.height;
+    CGFloat rotatedFinalHeight = finalBoundsSize.width;
+    if (oldBoundsSize.width <= 0 || oldBoundsSize.height <= 0 ||
+        rotatedFinalWidth <= 0 || rotatedFinalHeight <= 0) {
+        if (handleSnapshot == handleVisualHandoffSnapshotView) {
+            [handleSnapshot removeFromSuperview];
+            handleVisualHandoffSnapshotView = nil;
+        }
+        self.handle.alpha = 1;
+        return NO;
+    }
+
+    CGFloat scaleX = oldBoundsSize.width / rotatedFinalWidth;
+    CGFloat scaleY = oldBoundsSize.height / rotatedFinalHeight;
+    CGFloat inverseScale = MIN(scaleX, scaleY);
+    if (!isfinite(inverseScale) || inverseScale <= 0) {
+        if (handleSnapshot == handleVisualHandoffSnapshotView) {
+            [handleSnapshot removeFromSuperview];
+            handleVisualHandoffSnapshotView = nil;
+        }
+        self.handle.alpha = 1;
+        return NO;
+    }
+
+    CGFloat inverseAngle = POPresentationAngleForOrientation(fromOrientation) -
+        POPresentationAngleForOrientation(toOrientation);
+    CGAffineTransform initialTransform = CGAffineTransformMakeRotation(inverseAngle);
+    initialTransform = CGAffineTransformScale(initialTransform, inverseScale, inverseScale);
+
+    [keyboardZoomContainer.layer removeAllAnimations];
+    [panelBackdropView.layer removeAllAnimations];
+    [self.handle.layer removeAllAnimations];
+    [UIView performWithoutAnimation:^{
+        self->keyboardZoomContainer.transform = initialTransform;
+        self->keyboardZoomContainer.center = initialCenter;
+        self->panelBackdropView.alpha = startingBackdropAlpha;
+        self.handle.alpha = handleSnapshot ? 0.02 : 1;
+    }];
+
+    runtimeHostedCategoryTransitionAnimating = YES;
+    NSUInteger generation = ++runtimeHostedCategoryTransitionGeneration;
+    void (^animations)(void) = ^{
+        self->keyboardZoomContainer.transform = CGAffineTransformIdentity;
+        self->keyboardZoomContainer.center = finalCenter;
+        self->panelBackdropView.alpha = rotationBackdropAlpha;
+        if (handleSnapshot && handleSnapshot == self->handleVisualHandoffSnapshotView) {
+            handleSnapshot.alpha = 0;
+            self.handle.alpha = 1;
+        }
+    };
+    void (^completion)(BOOL) = ^(__unused BOOL finished) {
+        if (generation != self->runtimeHostedCategoryTransitionGeneration) {
+            return;
+        }
+        self->runtimeHostedCategoryTransitionAnimating = NO;
+        [UIView performWithoutAnimation:^{
+            self->keyboardZoomContainer.transform = CGAffineTransformIdentity;
+            self->keyboardZoomContainer.center = finalCenter;
+            self->panelBackdropView.alpha = rotationBackdropAlpha;
+            self.handle.alpha = 1;
+        }];
+        if (handleSnapshot == self->handleVisualHandoffSnapshotView) {
+            [handleSnapshot removeFromSuperview];
+            self->handleVisualHandoffSnapshotView = nil;
+        }
+        [self removeKeyboardZoomSuspension:POKeyboardZoomSuspensionRotation];
+        [self reevaluateKeyboardZoomAnimated:NO];
+        if (fadeInBackdropAfterRotation) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (generation != self->runtimeHostedCategoryTransitionGeneration ||
+                    self->runtimeHostedCategoryTransitionAnimating) {
+                    return;
+                }
+
+                [self updateInteractionBackdropsAnimated:NO];
+                [self->panelBackdropView.layer removeAnimationForKey:@"po.runtimeBackdropFadeIn"];
+                CABasicAnimation *fade = [CABasicAnimation animationWithKeyPath:@"opacity"];
+                fade.fromValue = @0;
+                fade.toValue = @(self->panelBackdropView.alpha);
+                fade.duration = 0.20;
+                fade.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+                [self->panelBackdropView.layer addAnimation:fade forKey:@"po.runtimeBackdropFadeIn"];
+            });
+        } else {
+            [self updateInteractionBackdropsAnimated:NO];
+        }
+
+        [self flushDeferredRuntimeScenePublicationIfNeeded];
+
+        if (hostGeneration == self->hostSession.currentGeneration) {
+            ContextHostManager *manager = [ContextHostManager sharedInstance];
+            UIInterfaceOrientation sourceOrientation =
+                manager.currentHostedPresentationSourceOrientation;
+            BOOL sourceNeedsCanonicalization =
+                POIsConcretePresentationOrientation(sourceOrientation) &&
+                POIsConcretePresentationOrientation(toOrientation) &&
+                UIInterfaceOrientationIsLandscape(sourceOrientation) !=
+                    UIInterfaceOrientationIsLandscape(toOrientation);
+            if (sourceNeedsCanonicalization) {
+                if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion == 15) {
+                    self->runtimeScenePublicationStaging = YES;
+                    [manager canonicalizeHostedSourceForCurrentOrientationWithGeneration:hostGeneration];
+                    self->runtimeScenePublicationStaging = NO;
+                } else {
+                    BOOL snapshotReady =
+                        [self prepareRuntimeCategoryTransitionSnapshotFromSourceOrientation:sourceOrientation];
+                    if (snapshotReady) {
+                        [self retargetRuntimeCategoryTransitionSnapshotForOrientation:toOrientation];
+                    }
+                    BOOL canonicalizationStarted = snapshotReady &&
+                        [manager canonicalizeHostedSourceForCurrentOrientationWithGeneration:hostGeneration];
+                    if (snapshotReady && !canonicalizationStarted) {
+                        [self clearPresentationSnapshot];
+                    }
+                }
+            }
+        }
+    };
+
+    ((void (*)(id, SEL, id, BOOL, id, id))objc_msgSend)(
+        animatorClass, animateSelector, animationParameters, YES, animations, completion);
+    return YES;
+}
+
+-(void)updatePortraitHostedLandscapeHandleForCurrentOffset{
+    if (self.handle.layoutMode != POHandleLayoutModeLandscapeFixedBottomLeft ||
+        CGRectIsEmpty(keyboardZoomBaseFrame)) {
+        return;
+    }
+
+    CGFloat maximumOffset = [self maximumContentOffsetX];
+    CGFloat progress = maximumOffset > 0
+        ? MIN(MAX(scrollView.contentOffset.x / maximumOffset, 0), 1)
+        : 0;
+
+    CGFloat openCardX = CGRectGetMinX(keyboardZoomBaseFrame) - maximumOffset;
+    CGFloat openHandleX = openCardX;
+    CGFloat closedHandleX = CGRectGetWidth(self.view.bounds) - CONTENT_EDGE_GAP - CGRectGetWidth(self.handle.bounds);
+    CGFloat desiredScreenX = closedHandleX + (openHandleX - closedHandleX) * progress;
+
+    CGFloat desiredScreenY = CGRectGetMaxY(keyboardZoomBaseFrame) + HANDLE_EDGE_GAP;
+
+    CGRect railFrame = handleScrollView.frame;
+    railFrame.origin.x = desiredScreenX + scrollView.contentOffset.x;
+    handleScrollView.frame = railFrame;
+
+    self.handle.restingOriginX = 0;
+    CGRect handleFrame = self.handle.frame;
+    handleFrame.origin.x = 0;
+    handleFrame.origin.y = desiredScreenY - CGRectGetMinY(handleScrollView.frame);
+    self.handle.frame = handleFrame;
+}
+
+-(CGFloat)currentHandleScreenY{
+    CGRect handleInView = [handleScrollView convertRect:self.handle.frame toView:self.view];
+    return !CGRectIsEmpty(handleInView) && isfinite(CGRectGetMinY(handleInView))
+        ? CGRectGetMinY(handleInView)
+        : NAN;
+}
+
 -(BOOL)isPanelFullyClosedAndIdle{
-    return !self.isOpened &&
-        !scrollSnapAnimationInProgress &&
-        !scrollView.dragging &&
-        !scrollView.decelerating &&
+    return panelState == POPanelStateClosed &&
+        !scrollSnapAnimationInProgress && !scrollView.dragging && !scrollView.decelerating &&
         fabs(scrollView.contentOffset.x) <= CLOSED_CONTENT_OFFSET_EPSILON;
 }
 
-// 展开态也允许快捷菜单：只要面板不在拖动/吸附过程中即可。
-// 闭合态仍要求完全收起，避免半开卡片时误触菜单。
--(BOOL)canPresentQuickSwitchMenu{
-    if (scrollSnapAnimationInProgress || scrollView.dragging || scrollView.decelerating) {
+-(BOOL)canBeginQuickSwitchSession{
+    if (presentedQuickSwitchMenu || scrollSnapAnimationInProgress ||
+        scrollView.dragging || scrollView.decelerating ||
+        panelPanIntent != POPanelPanIntentNone || hostedCategoryTransitionPending ||
+        runtimeHostedCategoryTransitionAnimating || handleVisualHandoffSnapshotView) {
         return NO;
     }
-    if (self.isOpened) {
-        return YES;
+    return [self isPanelFullyClosedAndIdle] || [self isPanelFullyOpen];
+}
+
+-(void)finishPanelSnapToOpenState:(BOOL)shouldOpen{
+    scrollSnapAnimationInProgress = NO;
+    interactiveHostIntentIssued = NO;
+    interactiveHostResumeRequired = NO;
+
+    if (shouldOpen) {
+        panelState = POPanelStateOpen;
+        keyboardZoomContainer.hidden = NO;
+        if (presentationSnapshotView && !presentationSnapshotView.hidden &&
+            hostSession.state == POHostSessionStateLive) {
+            [self schedulePresentationSnapshotRetirementForBundleId:hostSession.requestedBundleId
+                                                          generation:hostSession.currentGeneration];
+        }
+        if ([self isPanelFullyOpen]) {
+            [self removeKeyboardZoomSuspension:POKeyboardZoomSuspensionDragging];
+            [self reevaluateCardScaleAnimated:YES source:POCardScaleTransitionSourceReconcile];
+        }
+    } else {
+        [scrollView setContentOffset:CGPointZero animated:NO];
+        [self hidePresentationContainer];
+        shadowView.layer.shadowOpacity = 0;
+        BOOL deferSessionCleanup = deferScaledCloseSessionCleanup;
+        deferScaledCloseSessionCleanup = NO;
+        if (!deferSessionCleanup) {
+            [self capturePresentationSnapshotIfPossible];
+        }
+        POQuickSwitchLayoutMode previousLayoutMode = [self currentQuickSwitchLayoutMode];
+        CGFloat inheritedHandleScreenY = NAN;
+        if (previousLayoutMode == POQuickSwitchLayoutModeHorizontalBottom) {
+            CGRect handleInView = [handleScrollView convertRect:self.handle.frame toView:self.view];
+            if (!CGRectIsEmpty(handleInView) && isfinite(CGRectGetMinY(handleInView))) {
+                inheritedHandleScreenY = CGRectGetMinY(handleInView);
+            }
+        }
+        UIView *handleHandoffSnapshot = nil;
+        if (previousLayoutMode == POQuickSwitchLayoutModeHorizontalBottom) {
+            handleHandoffSnapshot = [self beginHandleVisualHandoffSnapshot];
+        }
+        panelState = POPanelStateClosed;
+        if (previousLayoutMode != [self currentQuickSwitchLayoutMode]) {
+            [self applyLayoutPreservingHandlePosition:YES];
+            [self inheritVerticalHandleScreenY:inheritedHandleScreenY];
+        }
+        [self completeHandleVisualHandoffFromSnapshot:handleHandoffSnapshot];
+        keyboardNotificationState = POKeyboardNotificationStateUnknown;
+        hostedKeyboardLayerPresent = NO;
+        keyboardHideAnimationInFlight = NO;
+        keyboardStateHostGeneration = 0;
+        keyboardZoomSuppressedForCurrentSession = NO;
+        [self restoreKeyboardZoomImmediately];
+        [self removeKeyboardZoomSuspension:POKeyboardZoomSuspensionDragging];
+        showingCantHost = NO;
+        if (externalSceneStack) {
+            [externalSceneStack removeFromSuperview];
+            externalSceneStack = nil;
+        }
+        if (deferSessionCleanup) {
+            NSUInteger cleanupGeneration = deferredOpenGeneration;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                         (int64_t)(PO_SCALED_CLOSE_POST_COMMIT_CLEANUP_DELAY * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                if (cleanupGeneration != self->deferredOpenGeneration ||
+                    self->panelState != POPanelStateClosed) {
+                    return;
+                }
+                [self capturePresentationSnapshotIfPossible];
+                [self retainPresentationAfterReleaseIfPossible];
+                [self->hostSession releaseActiveSessionPreservingPresentation];
+                [[POSplitSessionController sharedInstance] end];
+            });
+        } else {
+            [self retainPresentationAfterReleaseIfPossible];
+            [hostSession releaseActiveSessionPreservingPresentation];
+            [[POSplitSessionController sharedInstance] end];
+        }
+        [self storeHandlePosition];
+        [self resetAutoNubTimer];
     }
-    return fabs(scrollView.contentOffset.x) <= CLOSED_CONTENT_OFFSET_EPSILON;
+    [self scheduleFinishPanelDragZoomIfIdle];
 }
 
--(CGFloat)desiredBackgroundDimAlpha{
-    // 快捷菜单结束时不能无脑把遮罩打到 0：展开态应保留打开进度对应的遮罩。
-    return [self horizontalOpenProgress];
+-(void)preparePanelForOpenPresentationIfNeeded{
+    if (panelState != POPanelStateClosed) {
+        return;
+    }
+
+    POQuickSwitchLayoutMode previousLayoutMode = [self currentQuickSwitchLayoutMode];
+    UIView *handleHandoffSnapshot = nil;
+    if ([self shouldUsePortraitHostedLandscapeOptimizationForOrientation:
+            [self resolvedHostedLayoutOrientation]]) {
+        handleHandoffSnapshot = [self beginHandleVisualHandoffSnapshot];
+    }
+
+    panelState = POPanelStateOpening;
+    if (previousLayoutMode != [self currentQuickSwitchLayoutMode]) {
+        [self applyLayoutPreservingHandlePosition:YES];
+    }
+    if (handleHandoffSnapshot) {
+        [self completeHandleVisualHandoffFromSnapshot:handleHandoffSnapshot];
+    }
 }
 
-// 点按与拖动释放共用同一条吸附路径。关键：过冲（rubber-band）必须用动画
-// 收回到目标，绝不能 setContentOffset:animated:NO 瞬间归位——那就是“闪一下”。
 -(void)snapPanelToOpenState:(BOOL)shouldOpen{
+    POPanelState previousState = panelState;
     pendingOpenState = shouldOpen;
+
+    if (shouldOpen && previousState == POPanelStateClosed) {
+        [self preparePanelForOpenPresentationIfNeeded];
+    }
+    if (!shouldOpen && previousState != POPanelStateClosed && previousState != POPanelStateClosing) {
+        [self clearPresentationSnapshot];
+        [hostSession beginClosingPreservingActiveLease];
+    }
+    POQuickSwitchLayoutMode previousLayoutMode = [self currentQuickSwitchLayoutMode];
+    panelState = shouldOpen ? POPanelStateOpening : POPanelStateClosing;
+    if (previousLayoutMode != [self currentQuickSwitchLayoutMode]) {
+        [self applyLayoutPreservingHandlePosition:YES];
+    }
     CGFloat maximumOffset = [self maximumContentOffsetX];
     CGFloat targetOffset = shouldOpen ? maximumOffset : 0;
     CGFloat rawOffsetX = scrollView.contentOffset.x;
@@ -606,29 +2249,16 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
     BOOL xAlreadyOnTarget = fabs(rawOffsetX - targetOffset) <= CLOSED_CONTENT_OFFSET_EPSILON;
     BOOL yAlreadyClean = fabs(rawOffsetY) <= CLOSED_CONTENT_OFFSET_EPSILON;
     if (xAlreadyOnTarget && yAlreadyClean) {
-        scrollSnapAnimationInProgress = NO;
-        if (!shouldOpen) {
-            self.isOpened = NO;
-            [self storeHandlePosition];
-            [self resetAutoNubTimer];
-        }
+        [self finishPanelSnapToOpenState:shouldOpen];
         return;
     }
 
-    // 仅 Y 漂移、X 已在目标：无动画修正 Y，不会产生横向闪动。
     if (xAlreadyOnTarget && !yAlreadyClean) {
         [scrollView setContentOffset:CGPointMake(targetOffset, 0) animated:NO];
-        scrollSnapAnimationInProgress = NO;
-        if (!shouldOpen) {
-            self.isOpened = NO;
-            [self storeHandlePosition];
-            [self resetAutoNubTimer];
-        }
+        [self finishPanelSnapToOpenState:shouldOpen];
         return;
     }
 
-    // 中途位置或过冲：从当前位置动画到目标。先冻结在当前帧取消系统惯性，
-    // 不要先夹到合法区间（那会跳一帧），再 animated:YES 收回。
     scrollSnapAnimationInProgress = YES;
     if (scrollView.decelerating) {
         [scrollView setContentOffset:scrollView.contentOffset animated:NO];
@@ -636,9 +2266,180 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
     [scrollView setContentOffset:CGPointMake(targetOffset, 0) animated:YES];
 }
 
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+    shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    return NO;
+}
+
+-(BOOL)canUseDirectScaledProgrammaticCloseAnimation{
+    return panelState == POPanelStateOpen &&
+        !scrollSnapAnimationInProgress && !scrollView.dragging && !scrollView.decelerating &&
+        self.handle.layoutMode == POHandleLayoutModeVerticalRail &&
+        !keyboardZoomContainer.hidden &&
+        fabs(appliedCardScale - 1.0) > PO_CARD_SCALE_EPSILON &&
+        fabs(scrollView.contentOffset.x - [self maximumContentOffsetX]) <= CLOSED_CONTENT_OFFSET_EPSILON &&
+        !CGRectIsEmpty(keyboardZoomBaseFrame);
+}
+
+-(void)performDirectScaledProgrammaticCloseAnimation{
+    if (![self canUseDirectScaledProgrammaticCloseAnimation]) {
+        [self snapPanelToOpenState:NO];
+        return;
+    }
+
+    pendingOpenState = NO;
+    [self cancelPresentationHandoff];
+    [hostSession beginClosingPreservingActiveLease];
+    panelState = POPanelStateClosing;
+    scrollSnapAnimationInProgress = YES;
+    scaledProgrammaticCloseAnimating = YES;
+    scaledProgrammaticCloseNeedsLayout = NO;
+    CALayer *cardPresentationLayer = keyboardZoomContainer.layer.presentationLayer;
+    CALayer *handlePresentationLayer = handleScrollView.layer.presentationLayer;
+    CGPoint cardStartCenter = cardPresentationLayer ? cardPresentationLayer.position : keyboardZoomContainer.center;
+    CGPoint handleStartCenter = handlePresentationLayer ? handlePresentationLayer.position : handleScrollView.center;
+    CGAffineTransform cardVisualTransform = cardPresentationLayer
+        ? cardPresentationLayer.affineTransform
+        : keyboardZoomContainer.transform;
+    CGAffineTransform handleVisualTransform = handlePresentationLayer
+        ? handlePresentationLayer.affineTransform
+        : handleScrollView.transform;
+
+    keyboardZoomGeneration += 1;
+    [keyboardZoomContainer.layer removeAllAnimations];
+    [handleScrollView.layer removeAllAnimations];
+    [panelBackdropView.layer removeAllAnimations];
+    [quickSwitchBackdropView.layer removeAllAnimations];
+    [shadowView.layer removeAllAnimations];
+    [UIView performWithoutAnimation:^{
+        self->keyboardZoomContainer.center = cardStartCenter;
+        self->keyboardZoomContainer.transform = cardVisualTransform;
+        self->handleScrollView.center = handleStartCenter;
+        self->handleScrollView.transform = handleVisualTransform;
+    }];
+
+    CGFloat visualScale = fabs(cardVisualTransform.a);
+    if (!isfinite(visualScale) || visualScale <= 0) {
+        visualScale = isfinite(appliedCardScale) && appliedCardScale > 0 ? appliedCardScale : 1.0;
+    }
+    appliedCardScale = visualScale;
+    closingFrozenCardScale = visualScale;
+
+    CGFloat maximumOffset = [self maximumContentOffsetX];
+    CGFloat handleCompanionX = handleVisualTransform.tx;
+    CGFloat enlargementOverflow = MAX(0.0, CGRectGetWidth(keyboardZoomBaseFrame) * (visualScale - 1.0));
+    CGFloat cardTravelX = maximumOffset + enlargementOverflow + CONTENT_SHADOW_FADE_DISTANCE;
+    CGFloat handleTravelX = maximumOffset - handleCompanionX;
+
+    CGPoint cardEndCenter = CGPointMake(cardStartCenter.x + cardTravelX, cardStartCenter.y);
+    CGPoint handleEndCenter = CGPointMake(handleStartCenter.x + handleTravelX, handleStartCenter.y);
+
+    [UIView animateWithDuration:PO_SCALED_PROGRAMMATIC_CLOSE_DURATION
+                          delay:0
+                        options:(UIViewAnimationOptionCurveEaseInOut |
+                                 UIViewAnimationOptionBeginFromCurrentState |
+                                 UIViewAnimationOptionAllowUserInteraction)
+                     animations:^{
+        self->keyboardZoomContainer.center = cardEndCenter;
+        self->handleScrollView.center = handleEndCenter;
+        self->panelBackdropView.alpha = 0;
+        self->quickSwitchBackdropView.alpha = 0;
+        self->shadowView.layer.shadowOpacity = 0;
+    } completion:^(__unused BOOL finished) {
+        if (!self->scaledProgrammaticCloseAnimating) {
+            return;
+        }
+
+        BOOL replayDeferredLayout = self->scaledProgrammaticCloseNeedsLayout;
+        [UIView performWithoutAnimation:^{
+            [self hidePresentationContainer];
+            [self->scrollView setContentOffset:CGPointZero animated:NO];
+            self->keyboardZoomContainer.center = cardStartCenter;
+            self->handleScrollView.center = handleStartCenter;
+            self->handleScrollView.transform = CGAffineTransformIdentity;
+        }];
+        self->scaledProgrammaticCloseAnimating = NO;
+        self->scaledProgrammaticCloseNeedsLayout = NO;
+        self->deferScaledCloseSessionCleanup = YES;
+        [self finishPanelSnapToOpenState:NO];
+        if (replayDeferredLayout) {
+            [self applyCurrentSettings];
+        }
+    }];
+}
+
+-(CGFloat)portraitHostedLandscapeReservedBottomChromeHeight{
+    return MAX(CGRectGetHeight(self.handle.bounds), [QuickSwitchHorizontalBarView preferredBarHeight]);
+}
+
+-(CGFloat)clampedPortraitHostedLandscapeCardBottomYForHandleAnchorY:(CGFloat)handleAnchorY
+                                                          cardHeight:(CGFloat)cardHeight{
+    CGRect bounds = self.view.bounds;
+    UIEdgeInsets viewInsets = self.view.safeAreaInsets;
+    UIEdgeInsets windowInsets = self.view.window.safeAreaInsets;
+    CGFloat topInset = MAX(viewInsets.top, windowInsets.top) + CONTENT_EDGE_GAP;
+    CGFloat bottomInset = MAX(viewInsets.bottom, windowInsets.bottom) + CONTENT_EDGE_GAP;
+    CGFloat minimumCardBottomY = topInset + cardHeight;
+    CGFloat maximumCardBottomY = CGRectGetHeight(bounds) - bottomInset -
+        [self portraitHostedLandscapeReservedBottomChromeHeight] - HANDLE_EDGE_GAP;
+    if (maximumCardBottomY < minimumCardBottomY) {
+        return minimumCardBottomY;
+    }
+    CGFloat desiredCardBottomY = handleAnchorY - HANDLE_EDGE_GAP;
+    return MIN(MAX(desiredCardBottomY, minimumCardBottomY), maximumCardBottomY);
+}
+
+-(void)syncHorizontalQuickSwitchPresentationAnchor{
+    if (!quickSwitchHorizontalBarView ||
+        [self currentQuickSwitchLayoutMode] != POQuickSwitchLayoutModeHorizontalBottom ||
+        CGRectIsEmpty(keyboardZoomBaseFrame)) {
+        return;
+    }
+    quickSwitchHorizontalBarView.presentationAnchorFrame =
+        CGRectOffset(keyboardZoomBaseFrame, -[self maximumContentOffsetX], 0);
+}
+
+-(BOOL)canMovePortraitHostedLandscapeCardVertically{
+    return panelState == POPanelStateOpen &&
+        [self currentQuickSwitchLayoutMode] == POQuickSwitchLayoutModeHorizontalBottom &&
+        !presentedQuickSwitchMenu &&
+        (quickSwitchInteractionOverlayView == nil || quickSwitchInteractionOverlayView.hidden) &&
+        !scrollSnapAnimationInProgress && !scrollView.dragging && !scrollView.decelerating &&
+        !CGRectIsEmpty(keyboardZoomBaseFrame);
+}
+
+-(void)applyPortraitHostedLandscapeVerticalHandleAnchorY:(CGFloat)handleAnchorY{
+    if (![self canMovePortraitHostedLandscapeCardVertically] &&
+        panelPanIntent != POPanelPanIntentVerticalCardMove) {
+        return;
+    }
+    CGFloat cardHeight = CGRectGetHeight(keyboardZoomBaseFrame);
+    if (cardHeight <= 0) {
+        return;
+    }
+    CGFloat cardBottomY = [self clampedPortraitHostedLandscapeCardBottomYForHandleAnchorY:handleAnchorY
+                                                                                     cardHeight:cardHeight];
+    CGFloat screenScale = UIScreen.mainScreen.scale;
+    CGRect baseFrame = keyboardZoomBaseFrame;
+    baseFrame.origin.y = round((cardBottomY - cardHeight) * screenScale) / screenScale;
+    portraitHostedLandscapeHandleAnchorY = cardBottomY + HANDLE_EDGE_GAP;
+    keyboardZoomBaseFrame = baseFrame;
+
+    [UIView performWithoutAnimation:^{
+        self->keyboardZoomContainer.transform = CGAffineTransformIdentity;
+        self->keyboardZoomContainer.frame = baseFrame;
+    }];
+    [self updatePortraitHostedLandscapeHandleForCurrentOffset];
+    [self syncHorizontalQuickSwitchPresentationAnchor];
+}
+
 -(void)applyLayoutPreservingHandlePosition:(BOOL)preserveHandlePosition{
     CGRect bounds = self.view.bounds;
     if (CGRectGetWidth(bounds) <= 0 || CGRectGetHeight(bounds) <= 0 || !self.handle) {
+        return;
+    }
+    if (scaledProgrammaticCloseAnimating) {
+        scaledProgrammaticCloseNeedsLayout = YES;
         return;
     }
 
@@ -650,57 +2451,81 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
         ? scrollView.contentOffset.x / (scrollView.contentSize.width - scrollView.bounds.size.width)
         : 0;
     BOOL preserveInteractiveOffset =
-        scrollView.dragging || scrollView.decelerating || scrollSnapAnimationInProgress;
+        scrollView.dragging || scrollView.decelerating || scrollSnapAnimationInProgress ||
+        panelPanIntent != POPanelPanIntentNone;
+
+    keyboardZoomGeneration += 1;
+    [keyboardZoomContainer.layer removeAllAnimations];
+    [handleScrollView.layer removeAllAnimations];
+    [UIView performWithoutAnimation:^{
+        self->keyboardZoomContainer.transform = CGAffineTransformIdentity;
+        self->handleScrollView.transform = CGAffineTransformIdentity;
+    }];
+    keyboardZoomApplied = NO;
+    appliedCardScale = 1.0;
 
     CGFloat portraitCanvasWidth = MIN(CGRectGetWidth(bounds), CGRectGetHeight(bounds));
     CGFloat portraitCanvasHeight = MAX(CGRectGetWidth(bounds), CGRectGetHeight(bounds));
     CGFloat handleRailWidth = [self handleRailWidth];
     chromeScale = (portraitCanvasWidth - handleRailWidth) / portraitCanvasWidth;
-    // 横屏上下是手机直边，没有刘海或灵动岛缺口，无需 chromeScale 边距，上下各保留 5pt 即可。
-    BOOL isLandscape = CGRectGetWidth(bounds) > CGRectGetHeight(bounds);
-    CGFloat contentLayoutHeight;
-    if (isLandscape) {
-        // 横屏上下是手机侧边框（直线无缺口），卡片高度 = 屏幕高度减去上下各
-        // 5pt 间隙即可，无需避开非安全区。托管画布 = 本机真实竖屏尺寸，把
-        // 整台竖屏画布等比缩放到该高度，卡片宽度随之得出，App 只重排不变形。
-        CGFloat availableCardHeight = CGRectGetHeight(bounds) - (CONTENT_EDGE_GAP * 2);
-        CGSize logicalCanvas = [self landscapeLogicalCanvasSizeForBounds:bounds];
-        scale = availableCardHeight / logicalCanvas.height;
-        // 将卡片对齐到物理像素网格，避免小数缩放在右/下边缘留下
-        // 抗锯齿产生的发丝细线。
-        CGFloat screenScale = UIScreen.mainScreen.scale;
-        contentLayoutWidth = round(logicalCanvas.width * scale * screenScale) / screenScale;
-        contentLayoutHeight = round(availableCardHeight * screenScale) / screenScale;
-    } else {
-        // 竖屏保留 chromeScale 边距以避开非安全区的上下（刘海 / home 条）。
-        // 卡片宽度 = 纯内容宽（画布宽 × chromeScale），不在此扣间距——离屏
-        // 5pt 间距由下方 trailingInset 单独负责（与横屏一致）。曾在此处减
-        // CONTENT_EDGE_GAP 会把间距重复计入、压窄内容，导致设置页右侧滚动条
-        // 被裁掉一条。
-        CGFloat portraitCardWidth = portraitCanvasWidth * chromeScale;
-        CGFloat portraitCardHeight = portraitCanvasHeight * chromeScale;
-        CGFloat availableCardHeight = CGRectGetHeight(bounds) * chromeScale;
-        CGFloat cardFitScale = MIN(1, availableCardHeight / portraitCardHeight);
-        scale = chromeScale * cardFitScale;
-        contentLayoutWidth = portraitCardWidth * cardFitScale;
-        contentLayoutHeight = portraitCardHeight * cardFitScale;
+    BOOL shellIsLandscape = CGRectGetWidth(bounds) > CGRectGetHeight(bounds);
+    UIInterfaceOrientation resolvedOrientation = [self contextManagerPreferredHostedInterfaceOrientation:nil];
+    if (!POIsConcretePresentationOrientation(resolvedOrientation)) {
+        resolvedOrientation = [self resolvedHostedLayoutOrientation];
+    }
+    if (!POIsConcretePresentationOrientation(resolvedOrientation)) {
+        resolvedOrientation = UIInterfaceOrientationPortrait;
+    }
+    hostedLayoutOrientation = resolvedOrientation;
+    BOOL portraitHostedLandscapeOptimization =
+        [self isPortraitHostedLandscapeOptimizationActiveForOrientation:hostedLayoutOrientation];
+    if (portraitHostedLandscapeOptimization &&
+        self.handle.layoutMode == POHandleLayoutModeVerticalRail) {
+        CGFloat currentHandleScreenY = [self currentHandleScreenY];
+        if (isfinite(currentHandleScreenY)) {
+            portraitHostedLandscapeHandleAnchorY = currentHandleScreenY;
+        }
+    } else if (!portraitHostedLandscapeOptimization) {
+        portraitHostedLandscapeHandleAnchorY = NAN;
+    }
+    CGSize logicalCanvas = [self contextManagerPreferredSceneStackSize:nil];
+    CGFloat leadingInset = [self leadingSafeAreaInset] + CONTENT_EDGE_GAP;
+    CGFloat trailingInset = [self trailingSafeAreaInset] + CONTENT_EDGE_GAP;
+    CGFloat availableCardWidth = portraitHostedLandscapeOptimization
+        ? CGRectGetWidth(bounds) - leadingInset - trailingInset
+        : CGRectGetWidth(bounds) - CONTENT_EDGE_GAP - self.handle.frame.size.width - HANDLE_EDGE_GAP - trailingInset;
+    CGFloat availableCardHeight = shellIsLandscape
+        ? CGRectGetHeight(bounds) - (CONTENT_EDGE_GAP * 2)
+        : portraitCanvasHeight * chromeScale;
+    availableCardWidth = MAX(1, availableCardWidth);
+    availableCardHeight = MAX(1, availableCardHeight);
+
+    CGFloat widthScale = availableCardWidth / MAX(1, logicalCanvas.width);
+    CGFloat heightScale = availableCardHeight / MAX(1, logicalCanvas.height);
+    scale = MIN(1.0, MIN(widthScale, heightScale));
+
+    CGFloat screenScale = UIScreen.mainScreen.scale;
+    contentLayoutWidth = round(logicalCanvas.width * scale * screenScale) / screenScale;
+    CGFloat contentLayoutHeight = round(logicalCanvas.height * scale * screenScale) / screenScale;
+    CGFloat anchoredCardBottomY = CGRectGetMidY(bounds);
+    if (portraitHostedLandscapeOptimization) {
+        CGFloat handleAnchorY = isfinite(portraitHostedLandscapeHandleAnchorY)
+            ? portraitHostedLandscapeHandleAnchorY
+            : CGRectGetMidY(bounds);
+        anchoredCardBottomY = [self clampedPortraitHostedLandscapeCardBottomYForHandleAnchorY:handleAnchorY
+                                                                                          cardHeight:contentLayoutHeight];
+        portraitHostedLandscapeHandleAnchorY = anchoredCardBottomY + HANDLE_EDGE_GAP;
     }
 
-    self.backgroundView.frame = bounds;
-    dragAndDropView.center = CGPointMake(CGRectGetMidX(bounds), CGRectGetMidY(bounds));
-    dragAndDropLabel.center = CGPointMake(CGRectGetMidX(bounds),
-                                          CGRectGetMaxY(dragAndDropView.frame) + 16 + CGRectGetMidY(dragAndDropLabel.bounds));
+    quickSwitchInteractionOverlayView.frame = bounds;
+    [quickSwitchDragCoordinator layoutForBounds:bounds safeAreaInsets:self.view.safeAreaInsets];
 
     scrollView.frame = bounds;
-    // 卡片展开后的右边缘位于实体安全区外加 5pt 间隙，闭合时仍在屏幕外；
-    // 因此滚动行程为卡片宽度加右侧安全区和间隙，保证把手与卡片始终同步。
-    CGFloat trailingInset = [self trailingSafeAreaInset] + CONTENT_EDGE_GAP;
     scrollView.contentSize = CGSizeMake(CGRectGetWidth(bounds) + contentLayoutWidth + trailingInset,
                                         CGRectGetHeight(bounds));
     CGFloat maximumContentOffsetX = [self maximumContentOffsetX];
     CGFloat restoredOffset = 0;
     if (preserveInteractiveOffset) {
-        // 拖动/吸附过程中若因安全区变化触发重排，保持连续进度，避免瞬间跳到全开/全关。
         restoredOffset = MIN(MAX(0, previousProgress), 1) * maximumContentOffsetX;
     } else {
         restoredOffset = previousProgress >= 0.5 ? maximumContentOffsetX : 0;
@@ -710,58 +2535,76 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
         [scrollView setContentOffset:CGPointMake(restoredOffset, 0) animated:NO];
     }
 
-    CGFloat handleViewportHeight = CGRectGetHeight(bounds) * chromeScale;
+    CGRect normalCardFrame = CGRectMake(CGRectGetWidth(bounds), 0, contentLayoutWidth, contentLayoutHeight);
+    normalCardFrame.origin.y = portraitHostedLandscapeOptimization
+        ? anchoredCardBottomY - CGRectGetHeight(normalCardFrame)
+        : CGRectGetMidY(bounds) - CGRectGetHeight(normalCardFrame) / 2.0;
+    normalCardFrame.origin.y = round(normalCardFrame.origin.y * screenScale) / screenScale;
+
+    BOOL horizontalMode = portraitHostedLandscapeOptimization;
+    self.handle.layoutMode = horizontalMode
+        ? POHandleLayoutModeLandscapeFixedBottomLeft
+        : POHandleLayoutModeVerticalRail;
+    handleScrollView.scrollEnabled = !horizontalMode;
+    handleScrollView.bounces = !horizontalMode;
+    handleScrollView.alwaysBounceVertical = !horizontalMode;
+
+    CGFloat handleViewportHeight = horizontalMode
+        ? CGRectGetHeight(bounds)
+        : CGRectGetHeight(bounds) * chromeScale;
     handleScrollView.frame = CGRectMake(CGRectGetWidth(bounds) - handleRailWidth, 0, handleRailWidth, handleViewportHeight);
-    handleScrollView.center = CGPointMake(handleScrollView.center.x, CGRectGetMidY(bounds));
-    handleScrollView.contentSize = CGSizeMake(handleRailWidth, (handleViewportHeight * 2) - self.handle.frame.size.height);
+    if (!horizontalMode) {
+        handleScrollView.center = CGPointMake(handleScrollView.center.x, CGRectGetMidY(bounds));
+        handleScrollView.contentSize = CGSizeMake(handleRailWidth, (handleViewportHeight * 2) - self.handle.frame.size.height);
 
-    CGFloat targetHandleOffset = 0;
-    if (preserveHandlePosition) {
-        if (previousMaximumOffset <= 0) {
-            // 首帧：把手滚动上下文尚未建立（contentSize 还是 0，maxOffset 为 0），
-            // 此时 handleRatio 恒为 0，若直接沿用会把把手贴到视口底部。改为读取
-            // 用户历史比例，没有则默认停在竖向正中（0.5），而非 offset=0 贴底。
-            NSNumber *storedRatio = [[NSUserDefaults standardUserDefaults] objectForKey:@"handlePointRatio"];
-            CGFloat ratio = storedRatio ? storedRatio.doubleValue : 0.5;
-            targetHandleOffset = ratio * [self maximumHandleOffset];
+        CGFloat targetHandleOffset = 0;
+        if (preserveHandlePosition) {
+            if (previousMaximumOffset <= 0) {
+                NSNumber *storedRatio = [[NSUserDefaults standardUserDefaults] objectForKey:@"handlePointRatio"];
+                CGFloat ratio = storedRatio ? storedRatio.doubleValue : 0.5;
+                targetHandleOffset = ratio * [self maximumHandleOffset];
+            } else {
+                targetHandleOffset = handleRatio * [self maximumHandleOffset];
+            }
         } else {
-            targetHandleOffset = handleRatio * [self maximumHandleOffset];
+            NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+            NSNumber *storedRatio = [defaults objectForKey:@"handlePointRatio"];
+            NSString *storedPoint = [defaults valueForKey:@"handlePoint"];
+            if (storedRatio) {
+                targetHandleOffset = storedRatio.doubleValue * [self maximumHandleOffset];
+            } else if (storedPoint) {
+                targetHandleOffset = CGPointFromString(storedPoint).y;
+            } else {
+                targetHandleOffset = [self maximumHandleOffset] / 2.0;
+            }
         }
+        [handleScrollView setContentOffset:CGPointMake(0, [self clampedHandleOffset:targetHandleOffset]) animated:NO];
+
+        self.handle.restingOriginX = handleRailWidth - HANDLE_EDGE_GAP - self.handle.frame.size.width;
+        CGRect handleLayoutFrame = self.handle.frame;
+        handleLayoutFrame.origin.y = handleViewportHeight - CGRectGetHeight(self.handle.bounds);
+        if (!self.handle.isNubbed) {
+            handleLayoutFrame.origin.x = self.handle.restingOriginX;
+        }
+        self.handle.frame = handleLayoutFrame;
+        quickSwitchHorizontalBarView.presentationAnchorFrame = CGRectZero;
     } else {
-        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-        NSNumber *storedRatio = [defaults objectForKey:@"handlePointRatio"];
-        NSString *storedPoint = [defaults valueForKey:@"handlePoint"];
-        if (storedRatio) {
-            targetHandleOffset = storedRatio.doubleValue * [self maximumHandleOffset];
-        } else if (storedPoint) {
-            targetHandleOffset = CGPointFromString(storedPoint).y;
-        } else {
-            // 首次安装/重装时没有任何存储位置，默认把手停在竖向正中，
-            // 而不是落到 offset=0（贴边）显得跑到边框底下。
-            targetHandleOffset = [self maximumHandleOffset] / 2.0;
-        }
-    }
-    [handleScrollView setContentOffset:CGPointMake(0, [self clampedHandleOffset:targetHandleOffset]) animated:NO];
+        handleScrollView.contentSize = handleScrollView.bounds.size;
+        [handleScrollView setContentOffset:CGPointZero animated:NO];
 
-    self.handle.restingOriginX = handleRailWidth - HANDLE_EDGE_GAP - self.handle.frame.size.width;
-    CGRect handleLayoutFrame = self.handle.frame;
-    handleLayoutFrame.origin.y = handleViewportHeight - self.handle.frame.size.height;
-    if (!self.handle.isNubbed) {
-        handleLayoutFrame.origin.x = self.handle.restingOriginX;
+        keyboardZoomBaseFrame = normalCardFrame;
+        [self updatePortraitHostedLandscapeHandleForCurrentOffset];
+        [scrollView bringSubviewToFront:handleScrollView];
+
+        [self syncHorizontalQuickSwitchPresentationAnchor];
     }
-    self.handle.frame = handleLayoutFrame;
+
+    [self.handle refreshNubbedPositionAnimated:NO];
     [self storeHandlePosition];
 
-    // offset 为 0 时卡片位于实体右边缘外；最大 offset 时其右侧保留安全区加 5pt 间隙，
-    // 在 iPad、8 Plus 和刘海设备上均适用。container 的 frame 是 scrollView 内容坐标，
-    // contentView/shadowView 则只使用 container 的局部 bounds。
-    CGRect normalCardFrame = CGRectMake(CGRectGetWidth(bounds), 0, contentLayoutWidth, contentLayoutHeight);
-    normalCardFrame.origin.y = CGRectGetMidY(bounds) - CGRectGetHeight(normalCardFrame) / 2.0;
-    CGFloat screenScale = UIScreen.mainScreen.scale;
-    normalCardFrame.origin.y = round(normalCardFrame.origin.y * screenScale) / screenScale;
     [UIView performWithoutAnimation:^{
-        // frame 在非 identity transform 下没有稳定的几何含义。
         keyboardZoomContainer.transform = CGAffineTransformIdentity;
+        handleScrollView.transform = CGAffineTransformIdentity;
         keyboardZoomContainer.frame = normalCardFrame;
         self->keyboardZoomBaseFrame = normalCardFrame;
         shadowView.frame = keyboardZoomContainer.bounds;
@@ -771,12 +2614,9 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
     }];
     CGFloat shadowProgress = MIN(MAX(scrollView.contentOffset.x / CONTENT_SHADOW_FADE_DISTANCE, 0), 1);
     shadowView.layer.shadowOpacity = CONTENT_SHADOW_OPACITY * shadowProgress;
-    activityIndicator.center = CGPointMake(CGRectGetMidX(self.contentView.bounds), CGRectGetMidY(self.contentView.bounds));
-    // 加载指示器是 contentView 的直接子视图，只在横屏追加适配缩放，
-    // 竖屏维持原尺寸且不会在较矮的横屏卡片中显得过大。
-    CGFloat directContentScale = chromeScale > 0 ? scale / chromeScale : 1;
-    activityIndicator.transform = CGAffineTransformMakeScale(directContentScale, directContentScale);
-
+    if (presentationSnapshotView) {
+        [self layoutPresentationSnapshotView];
+    }
     if (contextView) {
         [self layoutContextView];
     }
@@ -784,16 +2624,43 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
         [self layoutCantHostView];
     }
     lastLaidOutSize = bounds.size;
+    [self updateInteractionBackdropsAnimated:NO];
     [self reevaluateKeyboardZoomAnimated:NO];
-    // 全量布局会把 container 写回完整展开几何。若快捷菜单仍在展示，
-    // 必须基于新的完整 frame 重新计算避让，否则 5pt 间隙会被冲掉。
-    if (self.isOpened &&
+    if (panelState == POPanelStateOpen &&
         self.quickSwitchTableView &&
-        self.quickSwitchTableView.alpha > 0.01 &&
+        presentedQuickSwitchMenu == (UIView<POQuickSwitchMenuPresenting> *)self.quickSwitchTableView &&
         !self.quickSwitchTableView.hidden) {
         quickSwitchYieldActive = NO;
         [self applyQuickSwitchContentYieldIfNeededAnimated:NO];
     }
+
+    if (scrollSnapAnimationInProgress && !scrollView.dragging && !scrollView.decelerating) {
+        [self snapPanelToOpenState:pendingOpenState];
+    }
+}
+
+-(void)dismissTransientInteractionUI{
+    if (hostedCategoryTransitionPending || runtimeHostedCategoryTransitionAnimating || handleVisualHandoffSnapshotView) {
+        [self cancelRuntimeHostedCategoryTransition];
+    }
+    if (panelPanIntent == POPanelPanIntentVerticalCardMove) {
+        panelPanIntent = POPanelPanIntentNone;
+        panelVerticalMoveStartAnchorY = 0;
+    }
+    if (presentedQuickSwitchMenu) {
+        [self dismissPresentedQuickSwitchMenuImmediately];
+        return;
+    }
+    [self restoreQuickSwitchContentYieldIfNeededAnimated:NO];
+    quickSwitchInteractionOverlayView.hidden = YES;
+    [quickSwitchDragCoordinator cancelAnimated:NO];
+    [mirrorZoneView.layer removeAllAnimations];
+    mirrorZoneView.transform = CGAffineTransformIdentity;
+    mirrorZoneView.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
+    mirrorZoneView.alpha = 0;
+    mirrorZoneHighlighted = NO;
+    [self updateInteractionBackdropsAnimated:NO];
+    [scrollView bringSubviewToFront:keyboardZoomContainer];
 }
 
 -(void)prepareForOrientationChange{
@@ -801,61 +2668,98 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
         return;
     }
 
+    BOOL shouldBridgeIOS26Rotation =
+        NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26 &&
+        panelState != POPanelStateClosed && panelState != POPanelStateClosing &&
+        contextView && !contextView.hidden && contextView.superview == self.contentView &&
+        presentationBundleId.length > 0 &&
+        [presentationBundleId isEqualToString:hostSession.activeBundleId];
+    if (shouldBridgeIOS26Rotation && !presentationSnapshotView) {
+        [self capturePresentationSnapshotIfPossible];
+    }
+    if (shouldBridgeIOS26Rotation && presentationSnapshotView &&
+        runtimeCategoryTransitionSnapshotFallbackArmed &&
+        presentationSnapshotView.hidden && !runtimeCategoryTransitionSnapshotActive) {
+        [self clearPresentationSnapshot];
+        [self capturePresentationSnapshotIfPossible];
+    }
+    if (shouldBridgeIOS26Rotation && presentationSnapshotView &&
+        !presentationSnapshotIsTargetPlaceholder) {
+        [self prewarmRuntimeCategoryTransitionSnapshot];
+    }
+    if (shouldBridgeIOS26Rotation && presentationSnapshotView &&
+        !presentationSnapshotIsTargetPlaceholder &&
+        [presentationSnapshotBundleId isEqualToString:presentationBundleId]) {
+        runtimeCategoryTransitionSnapshotFallbackArmed = YES;
+        if (runtimeCategoryTransitionSnapshotActive) {
+            presentationSnapshotView.userInteractionEnabled = NO;
+            presentationSnapshotView.hidden = NO;
+            [self layoutPresentationSnapshotView];
+            [self.contentView bringSubviewToFront:presentationSnapshotView];
+        }
+    }
+
+    keyboardZoomSuppressedForCurrentSession = NO;
     [self addKeyboardZoomSuspension:POKeyboardZoomSuspensionRotation];
     [self restoreKeyboardZoomImmediately];
 
-    // 旋转前只清理临时 UI（快捷菜单 / 拖拽预览 / yield）。
-    // 新旋转路径会直接 applyInterfaceOrientation + 重布局，必须保留 isOpened、
-    // contentOffset 与托管会话，绝不能再强制关闭再手动打开。
     origOffset = nil;
-    [self restoreQuickSwitchContentYieldIfNeededAnimated:NO];
-    [self.quickSwitchTableView dismissImmediately];
-    [draggableImageView.layer removeAllAnimations];
-    [draggableImageView removeFromSuperview];
-    draggableImageView = nil;
-    dragAndDropView.transform = CGAffineTransformIdentity;
-    dragAndDropView.alpha = 0;
-    dragAndDropLabel.alpha = 0;
+    [self dismissTransientInteractionUI];
 }
 
 -(void)handleOrientationChange{
     if (!self.isViewLoaded) {
         return;
     }
-    // 仅按当前 bounds 重建外壳/把手/卡片几何。
-    // 不要在旋转回调里 hostViewForBundleID 重发宿主栈：会与窗口旋转动画抢时序，
-    // 反而更容易出现宿主图层方向与外壳短暂错位。
     [self applyLayoutPreservingHandlePosition:YES];
     [self removeKeyboardZoomSuspension:POKeyboardZoomSuspensionRotation];
     [self reevaluateKeyboardZoomAnimated:NO];
 }
 
 -(CGSize)contextManagerPreferredSceneStackSize:(id)manager{
-    // 新建的宿主视图需要和布局用同一个逻辑画布，托管内容才能填满卡片而不拉伸。
-    // 单一真相源是 landscapeLogicalCanvasSizeForBounds:；竖屏用设备自身尺寸。
     CGRect bounds = self.view.bounds;
-    if (CGRectGetWidth(bounds) > CGRectGetHeight(bounds)) {
-        return [self landscapeLogicalCanvasSizeForBounds:bounds];
+    CGFloat shortSide = MIN(CGRectGetWidth(bounds), CGRectGetHeight(bounds));
+    CGFloat longSide = MAX(CGRectGetWidth(bounds), CGRectGetHeight(bounds));
+    UIInterfaceOrientation orientation = [self contextManagerPreferredHostedInterfaceOrientation:manager];
+    return UIInterfaceOrientationIsLandscape(orientation)
+        ? CGSizeMake(longSide, shortSide)
+        : CGSizeMake(shortSide, longSide);
+}
+
+-(CGSize)hostSessionPreferredSystemSceneStackSize:(POHostSessionController *)__unused controller{
+    UIWindowScene *scene = self.view.window.windowScene;
+    CGRect bounds = scene ? scene.coordinateSpace.bounds : UIScreen.mainScreen.bounds;
+    if (CGRectIsEmpty(bounds)) {
+        bounds = UIScreen.mainScreen.bounds;
+    }
+
+    UIInterfaceOrientation orientation = [[ContextHostManager sharedInstance] currentSystemInterfaceOrientation];
+    if (!POIsConcretePresentationOrientation(orientation) && scene) {
+        orientation = scene.interfaceOrientation;
     }
     CGFloat shortSide = MIN(CGRectGetWidth(bounds), CGRectGetHeight(bounds));
     CGFloat longSide = MAX(CGRectGetWidth(bounds), CGRectGetHeight(bounds));
-    return CGSizeMake(shortSide, longSide);
+    return UIInterfaceOrientationIsLandscape(orientation)
+        ? CGSizeMake(longSide, shortSide)
+        : CGSizeMake(shortSide, longSide);
 }
 
 -(UIInterfaceOrientation)contextManagerPreferredHostedInterfaceOrientation:(id)manager{
-    // The card's logical host canvas is always portrait (short side × long
-    // side), including when the device is landscape. The source FBScene must
-    // render in the same virtual orientation before its layer is hosted.
-    return UIInterfaceOrientationPortrait;
-}
+    ContextHostManager *hostManager = [manager isKindOfClass:[ContextHostManager class]]
+        ? (ContextHostManager *)manager
+        : [ContextHostManager sharedInstance];
 
-// 横屏下托管 App 用于排版的逻辑画布：本机真实的竖屏尺寸（短边×长边）。
-// 不伪造任何设备，App 拿到自己真实的尺寸/安全区，据此完整正确布局；
-// 整台竖屏画布再等比缩小塞进横屏可用高度。布局和场景栈尺寸都用它。
--(CGSize)landscapeLogicalCanvasSizeForBounds:(CGRect)bounds{
-    CGFloat shortSide = MIN(CGRectGetWidth(bounds), CGRectGetHeight(bounds));
-    CGFloat longSide = MAX(CGRectGetWidth(bounds), CGRectGetHeight(bounds));
-    return CGSizeMake(shortSide, longSide);
+    NSString *requestedBundleId = hostSession.requestedBundleId;
+    NSString *activeBundleId = hostSession.activeBundleId;
+    BOOL committedQuickSwitchTargetPending = pinnedBundleId.length > 0 &&
+        activeBundleId.length > 0 &&
+        [requestedBundleId isEqualToString:activeBundleId] &&
+        ![pinnedBundleId isEqualToString:activeBundleId];
+    NSString *hostingBundleId = committedQuickSwitchTargetPending
+        ? pinnedBundleId
+        : (requestedBundleId.length > 0 ? requestedBundleId : pinnedBundleId);
+
+    return [self resolvedHostedOrientationForBundleId:hostingBundleId manager:hostManager];
 }
 
 -(BOOL)shouldAutorotate
@@ -876,25 +2780,26 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
 
 -(void)keyboardWillShow:(NSNotification *)notification{
     [self updateKeyboardAnimationFromNotification:notification];
+    if (panelState == POPanelStateOpen && hostSession.state == POHostSessionStateLive &&
+        hostSession.currentGeneration != 0) {
+        [[ContextHostManager sharedInstance]
+            canonicalizeHostedSourceForCurrentOrientationWithGeneration:hostSession.currentGeneration];
+    }
+    if (keyboardNotificationState != POKeyboardNotificationStateVisible) {
+        keyboardZoomSuppressedForCurrentSession = NO;
+    }
     keyboardNotificationState = POKeyboardNotificationStateVisible;
     keyboardHideAnimationInFlight = NO;
     [self avoidClosedHandleForKeyboardWillShow:notification];
-    [self reevaluateKeyboardZoomAnimated:YES];
+    [self reevaluateCardScaleAnimated:YES source:POCardScaleTransitionSourceKeyboard];
 }
 
 -(void)keyboardWillChangeFrame:(NSNotification *)notification{
     [self updateKeyboardAnimationFromNotification:notification];
-    // A WillChangeFrame can arrive after WillHide while the host layer is
-    // still being torn down. Do not let that late frame re-apply zoom.
     if (keyboardHideAnimationInFlight) {
         return;
     }
     BOOL frameVisible = [self keyboardFrameIsVisibleInNotification:notification];
-    // Once WillShow/DidShow established a visible keyboard, retain that
-    // explicit state for non-empty frame changes. Some SpringBoard versions
-    // report the frame in the pre-rotation coordinate space for one callback;
-    // treating that callback as a hide causes the exact intermittent miss we
-    // are fixing.
     if (keyboardNotificationState == POKeyboardNotificationStateVisible &&
         [self keyboardFrameHasNonzeroSizeInNotification:notification]) {
         frameVisible = YES;
@@ -903,29 +2808,25 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
         ? POKeyboardNotificationStateVisible
         : POKeyboardNotificationStateHidden;
     keyboardHideAnimationInFlight = keyboardNotificationState != POKeyboardNotificationStateVisible;
-    [self reevaluateKeyboardZoomAnimated:YES];
+    [self reevaluateCardScaleAnimated:YES source:POCardScaleTransitionSourceKeyboard];
 }
 
 -(void)keyboardWillHide:(NSNotification *)notification{
     [self updateKeyboardAnimationFromNotification:notification];
     keyboardNotificationState = POKeyboardNotificationStateHidden;
     keyboardHideAnimationInFlight = YES;
-    [self restoreKeyboardZoomAnimated:YES];
+    [self reevaluateCardScaleAnimated:YES source:POCardScaleTransitionSourceKeyboard];
     if ([[POApplicationHelper settings][@"keyboardAvoiding"] boolValue] && origOffset) {
         [handleScrollView setContentOffset:CGPointMake(0, [self clampedHandleOffset:origOffset.floatValue]) animated:YES];
         origOffset = nil;
     }
 }
 
-// Did notifications close the gap when SpringBoard coalesces or drops a
-// Will* notification. They are intentionally non-animated: the matching
-// Will* path already owns the keyboard animation, while these handlers are a
-// final state correction.
 -(void)keyboardDidShow:(NSNotification *)notification{
     [self updateKeyboardAnimationFromNotification:notification];
     keyboardNotificationState = POKeyboardNotificationStateVisible;
     keyboardHideAnimationInFlight = NO;
-    [self reevaluateKeyboardZoomAnimated:NO];
+    [self reevaluateCardScaleAnimated:NO source:POCardScaleTransitionSourceKeyboard];
 }
 
 -(void)keyboardDidChangeFrame:(NSNotification *)notification{
@@ -941,18 +2842,20 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
     keyboardNotificationState = frameVisible
         ? POKeyboardNotificationStateVisible
         : POKeyboardNotificationStateHidden;
-    [self reevaluateKeyboardZoomAnimated:NO];
+    [self reevaluateCardScaleAnimated:NO source:POCardScaleTransitionSourceKeyboard];
 }
 
 -(void)keyboardDidHide:(NSNotification *)notification{
     [self updateKeyboardAnimationFromNotification:notification];
     keyboardNotificationState = POKeyboardNotificationStateHidden;
     keyboardHideAnimationInFlight = NO;
-    [self restoreKeyboardZoomAnimated:NO];
+    keyboardZoomSuppressedForCurrentSession = NO;
+    [self reevaluateCardScaleAnimated:NO source:POCardScaleTransitionSourceKeyboard];
 }
 
 -(void)avoidClosedHandleForKeyboardWillShow:(NSNotification *)notification{
-    if (![[POApplicationHelper settings][@"keyboardAvoiding"] boolValue] || self.isOpened) {
+    if ([self isHorizontalQuickSwitchLayoutMode] ||
+        ![[POApplicationHelper settings][@"keyboardAvoiding"] boolValue] || [self isPanelActive]) {
         return;
     }
     CGRect keyboardFrame = [[notification userInfo][UIKeyboardFrameEndUserInfoKey] CGRectValue];
@@ -973,47 +2876,149 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
 }
 
 
--(void)pinAppWithBundleId:(NSString *)bundleId{
+-(void)commitPinnedBundleId:(NSString *)bundleId{
+    if (bundleId.length == 0 ||
+        ![POApplicationHelper isUserFacingApplicationBundleId:bundleId]) {
+        return;
+    }
     pinnedBundleId = bundleId;
-    
     [[NSUserDefaults standardUserDefaults] setObject:bundleId forKey:@"lastPinnedBundleId"];
-    UIImage *image = [POApplicationHelper imageForBundleId:bundleId];
-    self.handle.imageView.image = image;
+    [self refreshHandleIconIfNeeded];
+}
 
-    // 切换到不同应用时立即重建宿主。展开态下这就是“就地快速切换”；
-    // 闭合态下也会先准备好内容，随后再展开卡片。
-    if (![bundleId isEqualToString:hostedBundleId]) {
-        [self addKeyboardZoomSuspension:POKeyboardZoomSuspensionAppSwitch];
-        [self restoreKeyboardZoomImmediately];
-        hostUpdatesAllowed = YES;
-        [self beginHosting];
+-(void)restoreExternallyActivatedApplicationNatively:(NSString *)bundleId{
+    if (bundleId.length == 0) {
+        return;
+    }
+    externallyActivatedGeneration += 1;
+    externallyActivatedBundleId = nil;
+    [self prepareForNativeApplicationTakeover:bundleId];
+    [[UIApplication sharedApplication] launchApplicationWithIdentifier:bundleId suspended:NO];
+}
+
+-(void)completeExternallyActivatedApplicationIfNeeded:(NSString *)bundleId{
+    if (bundleId.length == 0 || ![externallyActivatedBundleId isEqualToString:bundleId]) {
+        return;
+    }
+    externallyActivatedGeneration += 1;
+    externallyActivatedBundleId = nil;
+}
+
+-(BOOL)openExternallyActivatedApplicationInPullOver:(NSString *)bundleId{
+    if (!NSThread.isMainThread || bundleId.length == 0 ||
+        ![POApplicationHelper isUserFacingApplicationBundleId:bundleId] ||
+        panelState != POPanelStateClosed || [self isPanelTransitioning] ||
+        presentedQuickSwitchMenu || scaledProgrammaticCloseAnimating) {
+        return NO;
     }
 
-    if (self.isOpened) {
-        // 已展开：保持打开，直接显示新 pin 的内容，无需先关再开。
-        [self snapPanelToOpenState:YES];
+    externallyActivatedGeneration += 1;
+    NSUInteger activationGeneration = externallyActivatedGeneration;
+    externallyActivatedBundleId = [bundleId copy];
+    [self pinAppWithBundleId:bundleId];
+    if (![pinnedBundleId isEqualToString:bundleId]) {
+        externallyActivatedGeneration += 1;
+        externallyActivatedBundleId = nil;
+        return NO;
+    }
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (activationGeneration != self->externallyActivatedGeneration ||
+            ![self->externallyActivatedBundleId isEqualToString:bundleId]) {
+            return;
+        }
+        BOOL scenePublished = self->hostSession.state == POHostSessionStateLive &&
+            [self->hostSession.activeBundleId isEqualToString:bundleId] &&
+            [self->presentationBundleId isEqualToString:bundleId];
+        if (scenePublished) {
+            [self completeExternallyActivatedApplicationIfNeeded:bundleId];
+            return;
+        }
+        [self restoreExternallyActivatedApplicationNatively:bundleId];
+    });
+    return YES;
+}
+
+-(void)pinAppWithBundleId:(NSString *)bundleId{
+    if (bundleId.length == 0 ||
+        ![POApplicationHelper isUserFacingApplicationBundleId:bundleId]) {
         return;
     }
 
-    // 选中的应用可能已在前台，此时沿用普通点按的“已打开”处理，不能为了托管而强制回桌面。
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        [self open];
+    BOOL hasVisibleLivePresentation = contextView && !contextView.hidden &&
+        contextView.superview == self.contentView && presentationBundleId.length > 0;
+    BOOL switchingVisibleTarget = panelState == POPanelStateOpen && hasVisibleLivePresentation &&
+        ![hostSession.activeBundleId isEqualToString:bundleId];
+    UIInterfaceOrientation previousHostedOrientation =
+        [self contextManagerPreferredHostedInterfaceOrientation:nil];
+    if (switchingVisibleTarget) {
+        [self capturePresentationSnapshotIfPossible];
+    }
+
+    [self commitPinnedBundleId:bundleId];
+
+    UIInterfaceOrientation nextHostedOrientation =
+        [self contextManagerPreferredHostedInterfaceOrientation:nil];
+    if (UIInterfaceOrientationIsLandscape(previousHostedOrientation) !=
+        UIInterfaceOrientationIsLandscape(nextHostedOrientation)) {
+        [self applyLayoutPreservingHandlePosition:YES];
+    }
+    if (switchingVisibleTarget) {
+        if (![self revealCachedPresentationSnapshotForBundleId:bundleId]) {
+            [self showTargetTransitionPresentationForBundleId:bundleId];
+        }
+    }
+
+    if (panelState == POPanelStateOpen) {
+        [hostSession activateBundleId:bundleId];
+        return;
+    }
+
+    [hostSession prepareBundleId:bundleId];
+    NSUInteger openGeneration = ++deferredOpenGeneration;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (openGeneration == self->deferredOpenGeneration &&
+            self->panelState == POPanelStateClosed &&
+            [self->pinnedBundleId isEqualToString:bundleId]) {
+            [self open];
+        }
     });
 }
 
 -(void)open{
+    if (pinnedBundleId.length == 0 || scaledProgrammaticCloseAnimating ||
+        panelState == POPanelStateOpening || panelState == POPanelStateOpen) {
+        return;
+    }
+    deferredOpenGeneration += 1;
     [self cancelAutoNubTimer];
-    // 两条路径统一使用同一个展开 offset。
+    [self removeKeyboardZoomSuspension:POKeyboardZoomSuspensionClosing];
+    [self beginSplitSessionIfNeeded];
+
+    [self preparePanelForOpenPresentationIfNeeded];
+
+    BOOL revealed = [self revealPresentationForBundleIdIfCompatible:pinnedBundleId];
+    if (!revealed) {
+        [self showTargetTransitionPresentationForBundleId:pinnedBundleId];
+    }
+    [hostSession activateBundleId:pinnedBundleId];
     [self snapPanelToOpenState:YES];
 }
 
 -(void)close{
+    if (panelState == POPanelStateClosed || panelState == POPanelStateClosing) {
+        return;
+    }
+    deferredOpenGeneration += 1;
     [self addKeyboardZoomSuspension:POKeyboardZoomSuspensionClosing];
-    [self restoreKeyboardZoomImmediately];
-    // 关闭面板前先收起快捷菜单并恢复卡片完整几何，避免 yield 状态残留。
-    [self.quickSwitchTableView dismissImmediately];
-    [self restoreQuickSwitchContentYieldIfNeededAnimated:NO];
-    [self snapPanelToOpenState:NO];
+    [self dismissPresentedQuickSwitchMenuImmediately];
+    if ([self canUseDirectScaledProgrammaticCloseAnimation]) {
+        [self performDirectScaledProgrammaticCloseAnimation];
+    } else {
+        [self snapPanelToOpenState:NO];
+    }
 }
      
 
@@ -1021,60 +3026,184 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
 
 -(void)handle:(POHandle *)handle didReceiveTap:(UIGestureRecognizer *)recognizer{
     [self cancelAutoNubTimer];
-    if (!self.isOpened) {
+    if ([self isPanelTransitioning] || scrollView.dragging || scrollView.decelerating) {
+        return;
+    }
+    if (panelState == POPanelStateClosed) {
         [self open];
-    }else{
+        return;
+    }
+    if (panelState == POPanelStateOpen && [self shouldHandleTapRestoreKeyboardZoom]) {
+        [self restoreKeyboardZoomFromHandleTap];
+        [self resetAutoNubTimer];
+        return;
+    }
+    if (panelState == POPanelStateOpen) {
         [self close];
     }
 }
 
--(void)handle:(POHandle *)handle didLongPress:(UILongPressGestureRecognizer *)recognizer{
-    if (![self canPresentQuickSwitchMenu]) {
+-(void)handle:(POHandle *)handle didPanPanel:(UIPanGestureRecognizer *)recognizer{
+    if (recognizer.state == UIGestureRecognizerStateBegan) {
+        panelPanIntent = POPanelPanIntentNone;
+        if ([self isPanelTransitioning]) {
+            return;
+        }
+
+        CGPoint velocity = [recognizer velocityInView:self.view];
+        BOOL verticalIntent = fabs(velocity.y) > fabs(velocity.x);
+        if (verticalIntent) {
+            if (![self canMovePortraitHostedLandscapeCardVertically]) {
+                return;
+            }
+            CGFloat currentHandleY = [self currentHandleScreenY];
+            if (!isfinite(currentHandleY)) {
+                return;
+            }
+            panelPanIntent = POPanelPanIntentVerticalCardMove;
+            portraitHostedLandscapeHandleAnchorY = currentHandleY;
+            panelVerticalMoveStartAnchorY = currentHandleY;
+            [self cancelAutoNubTimer];
+            [self restoreKeyboardZoomImmediately];
+            return;
+        }
+
+        panelPanIntent = POPanelPanIntentHorizontalPanel;
+        [self beginSplitSessionIfNeeded];
+        panelPanStartOffsetX = scrollView.contentOffset.x;
+        [self scrollViewWillBeginDragging:scrollView];
         return;
     }
 
-    if (recognizer.state == UIGestureRecognizerStateBegan) {
-        [self cancelAutoNubTimer];
-    }
-    if (self.handle.isNubbed) {
-        self.handle.isNubbed = NO;
-    }
-
-    if (recognizer.state == UIGestureRecognizerStateBegan) {
-        [self addKeyboardZoomSuspension:POKeyboardZoomSuspensionQuickSwitch];
-        [self restoreKeyboardZoomImmediately];
-    }
-    [self.quickSwitchTableView presentFromHandle:handle withRecognizer:recognizer];
-
-    // 闭合态：菜单出现时加深遮罩；展开态遮罩本就接近 1，结束时恢复到打开进度，
-    // 不能直接 alpha=0 把背景遮罩关掉。
-    [UIView animateWithDuration:0.3 animations:^{
-        if (recognizer.state == UIGestureRecognizerStateBegan) {
-            self.backgroundView.alpha = 1.0;
-        } else if (recognizer.state != UIGestureRecognizerStateChanged) {
-            self.backgroundView.alpha = [self desiredBackgroundDimAlpha];
+    if (recognizer.state == UIGestureRecognizerStateChanged) {
+        if (panelPanIntent == POPanelPanIntentVerticalCardMove) {
+            CGFloat translationY = [recognizer translationInView:self.view].y;
+            [self applyPortraitHostedLandscapeVerticalHandleAnchorY:
+                panelVerticalMoveStartAnchorY + translationY];
+            return;
         }
-    }];
-
-    if (recognizer.state != UIGestureRecognizerStateBegan &&
-        self.quickSwitchTableView.alpha < 0.01 &&
-        !quickSwitchOpeningApp) {
-        [self resetAutoNubTimer];
+        if (panelPanIntent != POPanelPanIntentHorizontalPanel) {
+            return;
+        }
+        CGFloat translationX = [recognizer translationInView:self.view].x;
+        CGFloat maximumOffset = [self maximumContentOffsetX];
+        CGFloat nextOffset = MIN(panelPanStartOffsetX - translationX, maximumOffset);
+        [scrollView setContentOffset:CGPointMake(nextOffset, 0) animated:NO];
+        return;
     }
+
+    if (recognizer.state == UIGestureRecognizerStateEnded ||
+        recognizer.state == UIGestureRecognizerStateCancelled ||
+        recognizer.state == UIGestureRecognizerStateFailed) {
+        if (panelPanIntent == POPanelPanIntentVerticalCardMove) {
+            CGFloat translationY = [recognizer translationInView:self.view].y;
+            [self applyPortraitHostedLandscapeVerticalHandleAnchorY:
+                panelVerticalMoveStartAnchorY + translationY];
+            panelPanIntent = POPanelPanIntentNone;
+            [self resetAutoNubTimer];
+            return;
+        }
+        if (panelPanIntent != POPanelPanIntentHorizontalPanel) {
+            panelPanIntent = POPanelPanIntentNone;
+            return;
+        }
+        CGFloat maximumOffset = [self maximumContentOffsetX];
+        CGFloat velocityX = [recognizer velocityInView:self.view].x;
+        if (fabs(velocityX) > 120) {
+            pendingOpenState = velocityX < 0;
+        } else {
+            pendingOpenState = scrollView.contentOffset.x >= maximumOffset / 2.0;
+        }
+        panelPanIntent = POPanelPanIntentNone;
+        [self scrollViewDidEndDragging:scrollView willDecelerate:NO];
+    }
+}
+
+-(void)handle:(POHandle *)handle didLongPress:(UILongPressGestureRecognizer *)recognizer{
+    if (recognizer.state == UIGestureRecognizerStateBegan) {
+        if (![self canBeginQuickSwitchSession]) {
+            return;
+        }
+
+        POQuickSwitchLayoutMode candidateMode = [self currentQuickSwitchLayoutMode];
+        POQuickSwitchLayoutMode selectedMode = (panelState == POPanelStateOpen)
+            ? candidateMode
+            : POQuickSwitchLayoutModeVerticalSide;
+        [self cancelAutoNubTimer];
+
+        if (selectedMode == POQuickSwitchLayoutModeVerticalSide && self.handle.isNubbed) {
+            self.handle.isNubbed = NO;
+        }
+
+        UIView<POQuickSwitchMenuPresenting> *candidateMenu =
+            [self quickSwitchMenuForLayoutMode:selectedMode];
+        BOOL menuHandledGesture = [candidateMenu presentFromHandle:handle withRecognizer:recognizer];
+        if (!menuHandledGesture && selectedMode == POQuickSwitchLayoutModeHorizontalBottom) {
+            selectedMode = POQuickSwitchLayoutModeVerticalSide;
+            if (self.handle.isNubbed) {
+                self.handle.isNubbed = NO;
+            }
+            candidateMenu = [self quickSwitchMenuForLayoutMode:selectedMode];
+            menuHandledGesture = [candidateMenu presentFromHandle:handle withRecognizer:recognizer];
+        }
+        if (!menuHandledGesture) {
+            [self restoreQuickSwitchContentYieldIfNeededAnimated:NO];
+            [scrollView bringSubviewToFront:keyboardZoomContainer];
+            [quickSwitchDragCoordinator cancelAnimated:NO];
+            [self resetAutoNubTimer];
+        }
+        return;
+    }
+
+    UIView<POQuickSwitchMenuPresenting> *presentingMenu = presentedQuickSwitchMenu;
+    if (!presentingMenu) {
+        return;
+    }
+
+    [presentingMenu presentFromHandle:handle withRecognizer:recognizer];
 }
 
 
 #pragma mark - QuickSwitch
 
--(void)quickSwitchTableView:(QuickSwitchTableView *)quickSwitchTableView didSelectBundleId:(NSString *)bundleId{
+-(void)cancelQuickSwitchPrewarm{
+    quickSwitchPrewarmGeneration += 1;
+    quickSwitchPrewarmBundleId = nil;
+}
+
+-(void)quickSwitchTableView:(UIView<POQuickSwitchMenuPresenting> *)quickSwitchTableView didHoverBundleId:(NSString *)bundleId{
+    [self cancelQuickSwitchPrewarm];
+    if (panelState != POPanelStateOpen || bundleId.length == 0 ||
+        [bundleId isEqualToString:hostSession.activeBundleId] ||
+        [[POApplicationHelper frontMostBundleId] isEqualToString:bundleId]) {
+        return;
+    }
+
+    quickSwitchPrewarmBundleId = [bundleId copy];
+    UIView<POQuickSwitchMenuPresenting> *presentingMenu = quickSwitchTableView;
+    NSUInteger generation = quickSwitchPrewarmGeneration;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.08 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (generation != self->quickSwitchPrewarmGeneration ||
+            ![self->quickSwitchPrewarmBundleId isEqualToString:bundleId] ||
+            self->panelState != POPanelStateOpen || presentingMenu.alpha < 0.01 || presentingMenu.hidden) {
+            return;
+        }
+        [self->hostSession prewarmBundleId:bundleId];
+    });
+}
+
+-(void)quickSwitchTableViewDidClearHover:(UIView<POQuickSwitchMenuPresenting> *)quickSwitchTableView{
+    [self cancelQuickSwitchPrewarm];
+}
+
+-(void)quickSwitchTableView:(UIView<POQuickSwitchMenuPresenting> *)quickSwitchTableView didSelectBundleId:(NSString *)bundleId{
+    [self cancelQuickSwitchPrewarm];
     quickSwitchOpeningApp = YES;
     [self cancelAutoNubTimer];
     [self pinAppWithBundleId:bundleId];
 }
 
-// 仅更新宿主/占位在卡片内的几何，绝不重设 transform。
-// 左手模式 contextView 带 scaleX=-1；若在 UIView 动画块里重新赋值该 transform，
-// UIKit 会把 -1 插值成“镜像翻页”假动画。
 -(void)syncHostedContentGeometryToContentView{
     if (contextView) {
         CGRect hostBounds = self.contentView.bounds;
@@ -1088,8 +3217,6 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
         cantHostCanvas.center = CGPointMake(CGRectGetMidX(self.contentView.bounds),
                                             CGRectGetMidY(self.contentView.bounds));
     }
-    activityIndicator.center = CGPointMake(CGRectGetMidX(self.contentView.bounds),
-                                           CGRectGetMidY(self.contentView.bounds));
 }
 
 -(void)applyQuickSwitchContentYieldIfNeeded{
@@ -1097,18 +3224,15 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
 }
 
 -(void)applyQuickSwitchContentYieldIfNeededAnimated:(BOOL)animated{
-    if (!self.isOpened || !self.quickSwitchTableView || self.quickSwitchTableView.alpha < 0.01) {
+    if (panelState != POPanelStateOpen || !self.quickSwitchTableView ||
+        presentedQuickSwitchMenu != (UIView<POQuickSwitchMenuPresenting> *)self.quickSwitchTableView) {
         return;
     }
 
-    // scrollView 本地坐标。左手是 window 级镜像，本地几何与右手一致（把手轨道在本地右侧）。
     CGRect menuInScroll = [self.quickSwitchTableView convertRect:self.quickSwitchTableView.bounds
                                                           toView:scrollView];
-    // 基准必须是完整展开卡片：已 yield 时用保存的完整 container frame，避免重复叠加位移。
     CGRect baseContainerFrame = quickSwitchYieldActive ? quickSwitchSavedContainerFrame : keyboardZoomContainer.frame;
 
-    // 只平移、不改尺寸：卡片本来就是从把手侧拉出的，菜单出现时往回推最符合手势逻辑，
-    // 也避免收窄 frame 造成内容裁切。
     CGRect containerFrame = baseContainerFrame;
     CGFloat gap = CONTENT_EDGE_GAP; // 5pt
     CGFloat menuMidX = CGRectGetMidX(menuInScroll);
@@ -1117,11 +3241,9 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
     CGFloat deltaX = 0;
 
     if (menuIsLeftOfContent) {
-        // 菜单在卡片左侧：整卡右移，使左缘 = 菜单右缘 + 5。
         CGFloat desiredMinX = CGRectGetMaxX(menuInScroll) + gap;
         deltaX = desiredMinX - CGRectGetMinX(containerFrame);
     } else {
-        // 菜单在卡片右侧：整卡左移，使右缘 = 菜单左缘 - 5。
         CGFloat desiredMaxX = CGRectGetMinX(menuInScroll) - gap;
         deltaX = desiredMaxX - CGRectGetMaxX(containerFrame);
     }
@@ -1141,11 +3263,9 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
     containerFrame.origin.x += deltaX;
     CGFloat screenScale = UIScreen.mainScreen.scale;
     containerFrame.origin.x = round(containerFrame.origin.x * screenScale) / screenScale;
-    // 尺寸保持完整展开尺寸，shadow/content 作为 container 的子视图不单独移动。
 
     void (^applyFrames)(void) = ^{
-        keyboardZoomContainer.frame = containerFrame;
-        // 仅平移，宿主尺寸未变，不需要重布局，避免左手 transform 被动画插值。
+        self->keyboardZoomContainer.frame = containerFrame;
     };
 
     if (animated) {
@@ -1168,10 +3288,12 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
         return;
     }
     quickSwitchYieldActive = NO;
-    CGRect containerFrame = quickSwitchSavedContainerFrame;
+    CGRect containerFrame = CGRectIsEmpty(keyboardZoomBaseFrame)
+        ? quickSwitchSavedContainerFrame
+        : keyboardZoomBaseFrame;
 
     void (^applyFrames)(void) = ^{
-        keyboardZoomContainer.frame = containerFrame;
+        self->keyboardZoomContainer.frame = containerFrame;
     };
 
     if (animated) {
@@ -1181,131 +3303,67 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
                          animations:applyFrames
                          completion:nil];
     } else {
-        applyFrames();
+        [keyboardZoomContainer.layer removeAllAnimations];
+        [UIView performWithoutAnimation:applyFrames];
     }
 }
 
--(void)quickSwitchTableViewWillAppear:(QuickSwitchTableView *)quickSwitchTableView{
-    // 展开时 contentView 默认盖住把手轨道。菜单弹出时把手轨道提到卡片之上，
-    // 且菜单必须在把手之上。
+-(void)beginQuickSwitchSessionForMenu:(UIView<POQuickSwitchMenuPresenting> *)menu{
+    if (!menu || presentedQuickSwitchMenu) {
+        if (menu && presentedQuickSwitchMenu && menu != presentedQuickSwitchMenu) {
+            [menu dismissImmediately];
+        }
+        return;
+    }
+
+    presentedQuickSwitchMenu = menu;
+    [self cancelQuickSwitchPrewarm];
+    [quickSwitchBackdropView.layer removeAllAnimations];
+    quickSwitchBackdropView.alpha = 0;
+    quickSwitchInteractionOverlayView.hidden = NO;
+    [self.view bringSubviewToFront:quickSwitchInteractionOverlayView];
+    [quickSwitchDragCoordinator cancelAnimated:NO];
+    self.handle.alpha = 0;
+    [self updateInteractionBackdropsAnimated:YES];
+
+    if ([self isHorizontalQuickSwitchMenu:menu]) {
+        [quickSwitchInteractionOverlayView bringSubviewToFront:quickSwitchHorizontalBarView];
+        [self hideMirrorZone];
+        return;
+    }
+
     [scrollView bringSubviewToFront:handleScrollView];
     [handleScrollView insertSubview:self.handle belowSubview:self.quickSwitchTableView];
     [handleScrollView bringSubviewToFront:self.quickSwitchTableView];
-
-    [self restoreKeyboardZoomImmediately];
-
-    // 展开态：整卡往回推，给菜单留 5pt——像把手把视图再推回去一点。
-    [self applyQuickSwitchContentYieldIfNeededAnimated:YES];
-
-    dragAndDropView.alpha = 1;
-    if (![[POApplicationHelper settings][@"hideLabels"] boolValue]){
-        dragAndDropLabel.alpha = 1;
+    if (fabs([self resolvedCardScale] - 1.0) <= PO_CARD_SCALE_EPSILON) {
+        [self applyQuickSwitchContentYieldIfNeededAnimated:YES];
     }
 }
 
-// 保留给菜单布局的可选查询（当前菜单自身不再依赖此避让）。
--(UIView *)quickSwitchContentViewForLayout{
-    return self.contentView;
-}
-
--(void)quickSwitchTableView:(QuickSwitchTableView *)quickSwitchTableView draggingDidChangeForQuickSwitchItem:(SBApplication *)app withPoint:(CGPoint)point{
-    
-    if (!draggableImageView) {
-        draggableImageView = [[UIImageView alloc] initWithFrame:CGRectMake(0, 0, 80, 80)];
-        draggableImageView.image = [POApplicationHelper imageForBundleId:app.bundleIdentifier];
-        draggableImageView.contentMode = UIViewContentModeScaleAspectFill;
-        draggableImageView.center = [self.backgroundView convertPoint:point fromView:quickSwitchTableView];
-        [self.backgroundView addSubview:draggableImageView];
-        
-        if ([[POApplicationHelper settings][@"leftHanded"] boolValue]){
-            draggableImageView.transform = CGAffineTransformConcat(CGAffineTransformMakeScale(-1.0, 1.0), CGAffineTransformMakeScale(0.01, 0.01));
-            [UIView animateWithDuration:0.2 animations:^{
-                draggableImageView.transform = CGAffineTransformConcat(CGAffineTransformMakeScale(-1.0, 1.0), CGAffineTransformMakeScale(1, 1));
-            }];
-        }else{
-            draggableImageView.transform = CGAffineTransformMakeScale(0.01, 0.01);
-            [UIView animateWithDuration:0.2 animations:^{
-                draggableImageView.transform = CGAffineTransformMakeScale(1, 1);
-            }];
-        }
-    }
-    
-    draggableImageView.center = [self.backgroundView convertPoint:point fromView:quickSwitchTableView];
-
-    CGPoint locationInView = [dragAndDropView convertPoint:point fromView:quickSwitchTableView];
-    if (CGRectContainsPoint(dragAndDropView.bounds, locationInView) ) {
-        [UIView animateWithDuration:0.3f animations:^{
-            NSString *format = POLocalizedString(@"Open %@", @"Tweak");
-            dragAndDropLabel.text = [NSString stringWithFormat:format, app.displayName];
-            dragAndDropView.transform = CGAffineTransformMakeScale(1.3, 1.3);
-        }];
-    }else{
-        [UIView animateWithDuration:0.3f animations:^{
-            dragAndDropLabel.text = POLocalizedString(@"Drag QuickSwitch Items\nHere To Open", @"Tweak");
-            dragAndDropView.transform = CGAffineTransformMakeScale(1, 1);
-        }];
-    }
-}
-
--(void)quickSwitchTableView:(QuickSwitchTableView *)quickSwitchTableView didDropApp:(SBApplication *)app atPoint:(CGPoint)point{
-    quickSwitchOpeningApp = YES;
-    [self cancelAutoNubTimer];
-    [self removeDraggableImageViewAnimated];
-    
-    if (CGRectContainsPoint(dragAndDropView.bounds, [dragAndDropView convertPoint:point fromView:quickSwitchTableView]) ) {
-        [[UIApplication sharedApplication] launchApplicationWithIdentifier:app.bundleIdentifier suspended:NO];
-    }
-}
-
--(void)draggingDidEnterBoundsOfQuickSwitchTableView:(QuickSwitchTableView *)quickSwitchTableView{
-    [self removeDraggableImageViewAnimated];
-}
-
--(void)removeDraggableImageViewAnimated{
-    [draggableImageView.layer removeAllAnimations];
-
-    
-    if ([[POApplicationHelper settings][@"leftHanded"] boolValue]){
-        draggableImageView.transform = CGAffineTransformConcat(CGAffineTransformMakeScale(-1.0, 1.0), CGAffineTransformMakeScale(1, 1));
-        [UIView animateWithDuration:0.2 animations:^{
-            draggableImageView.transform = CGAffineTransformConcat(CGAffineTransformMakeScale(-1.0, 1.0), CGAffineTransformMakeScale(0.01, 0.01));
-        }completion:^(BOOL finished) {
-            [draggableImageView removeFromSuperview];
-            draggableImageView = nil;
-        }];
-
-    }else{
-        draggableImageView.transform = CGAffineTransformMakeScale(1, 1);
-        [UIView animateWithDuration:0.2 animations:^{
-            draggableImageView.transform = CGAffineTransformMakeScale(0.01, 0.01);
-        }completion:^(BOOL finished) {
-            [draggableImageView removeFromSuperview];
-            draggableImageView = nil;
-        }];
+-(void)finishQuickSwitchSessionForMenu:(UIView<POQuickSwitchMenuPresenting> *)menu{
+    if (!menu || menu != presentedQuickSwitchMenu) {
+        return;
     }
 
-    
-    [UIView animateWithDuration:0.3f animations:^{
-        dragAndDropLabel.text = POLocalizedString(@"Drag QuickSwitch Items\nHere To Open", @"Tweak");
-        dragAndDropView.transform = CGAffineTransformMakeScale(1, 1);
-    }];
-}
-
--(void)quickSwitchTableViewDidDisappear:(QuickSwitchTableView *)quickSwitchTableView{
-    // 菜单关闭：恢复卡片位置与层级。
-    [self restoreQuickSwitchContentYieldIfNeeded];
-    [scrollView bringSubviewToFront:keyboardZoomContainer];
-    [self removeKeyboardZoomSuspension:POKeyboardZoomSuspensionQuickSwitch];
-    [self reevaluateKeyboardZoomAnimated:YES];
-
-    dragAndDropView.alpha = 0;
-    dragAndDropLabel.alpha = 0;
-    self.backgroundView.alpha = [self desiredBackgroundDimAlpha];
-
+    presentedQuickSwitchMenu = nil;
+    [self cancelQuickSwitchPrewarm];
+    [self restoreQuickSwitchContentYieldIfNeededAnimated:NO];
+    [self hideQuickSwitchBackdropImmediately];
+    quickSwitchInteractionOverlayView.hidden = YES;
+    self.handle.alpha = 1;
+    [self updateInteractionBackdropsAnimated:NO];
+    [self reconcileCardChromeZOrder];
+    [self reevaluateKeyboardZoomAnimated:NO];
+    [self hideMirrorZone];
+    [quickSwitchDragCoordinator cancelAnimated:NO];
     if (quickSwitchOpeningApp) {
+        if (panelState != POPanelStateClosed) {
+            quickSwitchOpeningApp = NO;
+            return;
+        }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (!self.isOpened) {
-                self->quickSwitchOpeningApp = NO;
+            self->quickSwitchOpeningApp = NO;
+            if (self->panelState == POPanelStateClosed) {
                 [self resetAutoNubTimer];
             }
         });
@@ -1314,32 +3372,264 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
     [self resetAutoNubTimer];
 }
 
+-(void)dismissPresentedQuickSwitchMenuImmediately{
+    if (!presentedQuickSwitchMenu) {
+        return;
+    }
+    [presentedQuickSwitchMenu dismissImmediately];
+}
+
+-(void)hideQuickSwitchBackdropImmediately{
+    if (!quickSwitchBackdropView) {
+        return;
+    }
+    [quickSwitchBackdropView.layer removeAllAnimations];
+    quickSwitchBackdropView.alpha = 0;
+}
+
+-(void)quickSwitchTableViewWillAppear:(UIView<POQuickSwitchMenuPresenting> *)quickSwitchTableView{
+    [self beginQuickSwitchSessionForMenu:quickSwitchTableView];
+}
+
+-(void)quickSwitchTableView:(UIView<POQuickSwitchMenuPresenting> *)quickSwitchTableView draggingDidChangeForQuickSwitchItem:(SBApplication *)app withPoint:(CGPoint)point{
+    [self cancelQuickSwitchPrewarm];
+    BOOL startedDragging = !quickSwitchDragCoordinator.isDragging;
+    [quickSwitchDragCoordinator beginDraggingBundleId:app.bundleIdentifier
+                                           displayName:app.displayName
+                                            sourceView:quickSwitchTableView
+                                            sourcePoint:point];
+    [quickSwitchDragCoordinator updateDraggingFromView:quickSwitchTableView atPoint:point];
+    if ([self isHorizontalQuickSwitchMenu:quickSwitchTableView]) {
+        mirrorZoneView.alpha = 0;
+    } else {
+        if (startedDragging) {
+            [self showMirrorZoneForMenu:quickSwitchTableView];
+        }
+        [self setMirrorZoneHighlighted:[self mirrorZoneContainsPoint:point fromView:quickSwitchTableView]];
+    }
+}
+
+-(void)quickSwitchTableView:(UIView<POQuickSwitchMenuPresenting> *)quickSwitchTableView didDropApp:(SBApplication *)app atPoint:(CGPoint)point{
+    [self cancelQuickSwitchPrewarm];
+    BOOL shouldOpenApp = [quickSwitchDragCoordinator finishDraggingFromView:quickSwitchTableView atPoint:point];
+    BOOL shouldSwitchSide = !shouldOpenApp &&
+        ![self isHorizontalQuickSwitchMenu:quickSwitchTableView] &&
+        [self mirrorZoneContainsPoint:point fromView:quickSwitchTableView];
+    quickSwitchOpeningApp = shouldOpenApp;
+    if (shouldOpenApp) {
+        [self cancelAutoNubTimer];
+    }
+
+    if (shouldSwitchSide) {
+        mirrorZoneView.alpha = 0;
+        [self commitMirrorSideSwitch];
+        return;
+    }
+
+    [self hideMirrorZone];
+    if (shouldOpenApp) {
+        NSString *bundleId = [app.bundleIdentifier copy];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self openApplicationExternallyFromQuickSwitch:bundleId];
+        });
+    }
+}
+
+-(void)routeExternalApplicationInsidePullOver:(NSString *)bundleId{
+    if (bundleId.length == 0 || [bundleId isEqualToString:pinnedBundleId] ||
+        ![POApplicationHelper isUserFacingApplicationBundleId:bundleId]) {
+        return;
+    }
+
+    BOOL sourcePresentationVisible = contextView && !contextView.hidden &&
+        contextView.superview == self.contentView &&
+        [presentationBundleId isEqualToString:pinnedBundleId] &&
+        [hostSession.activeBundleId isEqualToString:pinnedBundleId];
+    if (!sourcePresentationVisible) {
+        [self showTargetTransitionPresentationForBundleId:bundleId];
+    }
+
+    [hostSession activateBundleId:bundleId];
+}
+
+-(void)showCantHostAfterNativeTakeover{
+    if (panelState == POPanelStateClosed) {
+        return;
+    }
+
+    deferredOpenGeneration += 1;
+    [self cancelAutoNubTimer];
+    [self dismissTransientInteractionUI];
+    scrollSnapAnimationInProgress = NO;
+    [scrollView setContentOffset:CGPointMake([self maximumContentOffsetX], 0) animated:NO];
+    panelState = POPanelStateOpen;
+    [self applyLayoutPreservingHandlePosition:YES];
+    [self hidePresentationContainer];
+    shadowView.layer.shadowOpacity = 0;
+    [hostSession releaseActiveSessionForExternalTakeoverPreservingPresentation];
+    [[POSplitSessionController sharedInstance] end];
+    [self cleanUpSubviews];
+    presentationBundleId = nil;
+    presentationSceneIdentity = nil;
+    presentationCanvasSize = CGSizeZero;
+    presentationOrientation = UIInterfaceOrientationUnknown;
+    presentationSourceCanvasSize = CGSizeZero;
+    presentationSourceOrientation = UIInterfaceOrientationUnknown;
+    presentationRetainedAfterRelease = NO;
+    keyboardZoomContainer.hidden = NO;
+    keyboardZoomSuspensionReasons = POKeyboardZoomSuspensionNone;
+    [self restoreKeyboardZoomImmediately];
+    [self showCantHostView];
+    [self updateInteractionBackdropsAnimated:NO];
+}
+
+-(void)prepareForNativeApplicationTakeover:(NSString *)bundleId{
+    if (bundleId.length == 0) {
+        return;
+    }
+
+    NSString *activeHostedBundleId = [ContextHostManager activeHostedBundleId];
+    BOOL targetIsCurrentHostedApp = activeHostedBundleId.length > 0 &&
+        [activeHostedBundleId isEqualToString:bundleId];
+
+    deferredOpenGeneration += 1;
+    [[POSplitSessionController sharedInstance] end];
+    [self cancelQuickSwitchPrewarm];
+
+    if (targetIsCurrentHostedApp && panelState != POPanelStateClosed) {
+        [self showCantHostAfterNativeTakeover];
+        return;
+    }
+
+    BOOL panelHasVisibleTransaction = panelState != POPanelStateClosed;
+    if (panelHasVisibleTransaction) {
+        [self cancelAutoNubTimer];
+        [self addKeyboardZoomSuspension:POKeyboardZoomSuspensionClosing];
+        [self restoreQuickSwitchContentYieldIfNeededAnimated:NO];
+
+        mirrorZoneView.alpha = 0;
+        [quickSwitchDragCoordinator cancelAnimated:NO];
+
+        if (panelState != POPanelStateClosing) {
+            [self snapPanelToOpenState:NO];
+            [self capturePresentationSnapshotIfPossible];
+        }
+        [self hidePresentationContainer];
+        shadowView.layer.shadowOpacity = 0;
+        [self retainPresentationAfterReleaseIfPossible];
+    }
+
+    if (activeHostedBundleId.length == 0) {
+        return;
+    }
+
+    if (targetIsCurrentHostedApp) {
+        [hostSession releaseActiveSessionForExternalTakeoverPreservingPresentation];
+    } else {
+        [hostSession releaseActiveSessionPreservingPresentation];
+    }
+}
+
+-(void)openApplicationExternallyFromQuickSwitch:(NSString *)bundleId{
+    if (bundleId.length == 0) {
+        quickSwitchOpeningApp = NO;
+        return;
+    }
+
+    [self prepareForNativeApplicationTakeover:bundleId];
+    [[UIApplication sharedApplication] launchApplicationWithIdentifier:bundleId suspended:NO];
+}
+
+-(void)draggingDidEnterBoundsOfQuickSwitchTableView:(UIView<POQuickSwitchMenuPresenting> *)quickSwitchTableView{
+    [quickSwitchDragCoordinator cancelAnimated:YES];
+    [self hideMirrorZone];
+}
+
+#pragma mark - 镜像投放区（拖拽切换停靠side）
+
+-(CGRect)mirrorZoneFrameForMenu:(UIView *)menu{
+    CGRect menuInOverlay = [quickSwitchInteractionOverlayView convertRect:menu.bounds fromView:menu];
+    CGFloat overlayWidth = CGRectGetWidth(quickSwitchInteractionOverlayView.bounds);
+    CGFloat mirroredX = overlayWidth - CGRectGetMaxX(menuInOverlay);
+    return CGRectMake(mirroredX, CGRectGetMinY(menuInOverlay),
+                     CGRectGetWidth(menuInOverlay), CGRectGetHeight(menuInOverlay));
+}
+
+-(void)showMirrorZoneForMenu:(UIView *)menu{
+    if ([self isHorizontalQuickSwitchMenu:(UIView<POQuickSwitchMenuPresenting> *)menu]) {
+        mirrorZoneView.alpha = 0;
+        mirrorZoneHighlighted = NO;
+        return;
+    }
+    [mirrorZoneView.layer removeAllAnimations];
+    mirrorZoneView.transform = CGAffineTransformIdentity;
+    mirrorZoneView.frame = [self mirrorZoneFrameForMenu:menu];
+    CGFloat cornerRadius = POQuickSwitchMenuCornerRadius;
+    mirrorZoneView.layer.cornerRadius = cornerRadius;
+    mirrorZoneBorder.frame = mirrorZoneView.bounds;
+    mirrorZoneBorder.path = [UIBezierPath bezierPathWithRoundedRect:mirrorZoneView.bounds
+                                                       cornerRadius:cornerRadius].CGPath;
+    mirrorZoneIconView.center = CGPointMake(CGRectGetWidth(mirrorZoneView.bounds) / 2.0,
+                                            CGRectGetHeight(mirrorZoneView.bounds) / 2.0);
+    mirrorZoneHighlighted = NO;
+    mirrorZoneView.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
+    mirrorZoneView.alpha = 0;
+    [UIView animateWithDuration:0.18
+                          delay:0
+                        options:(UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState)
+                     animations:^{
+        self->mirrorZoneView.alpha = 1;
+    } completion:nil];
+}
+
+-(void)hideMirrorZone{
+    [mirrorZoneView.layer removeAllAnimations];
+    mirrorZoneView.alpha = 0;
+    mirrorZoneView.transform = CGAffineTransformIdentity;
+    mirrorZoneView.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
+    mirrorZoneHighlighted = NO;
+}
+
+-(void)setMirrorZoneHighlighted:(BOOL)highlighted{
+    if (mirrorZoneHighlighted == highlighted) return;
+    mirrorZoneHighlighted = highlighted;
+    [UIView animateWithDuration:0.16
+                          delay:0
+                        options:(UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState)
+                     animations:^{
+        self->mirrorZoneView.backgroundColor = [UIColor colorWithWhite:1 alpha:highlighted ? 0.22 : 0.08];
+        self->mirrorZoneView.transform = highlighted ? CGAffineTransformMakeScale(1.12, 1.05)
+                                               : CGAffineTransformIdentity;
+    } completion:nil];
+}
+
+-(BOOL)mirrorZoneContainsPoint:(CGPoint)point fromView:(UIView *)view{
+    if (view == quickSwitchHorizontalBarView || presentedQuickSwitchMenu == quickSwitchHorizontalBarView) {
+        return NO;
+    }
+    CGPoint local = [mirrorZoneView convertPoint:point fromView:view];
+    return CGRectContainsPoint(mirrorZoneView.bounds, local);
+}
+
+-(void)commitMirrorSideSwitch{
+    if (presentedQuickSwitchMenu == quickSwitchHorizontalBarView) {
+        return;
+    }
+    NSUserDefaults *defaults = [POApplicationHelper settingsDefaults];
+    BOOL leftHanded = [defaults boolForKey:@"leftHanded"];
+    [defaults setBool:!leftHanded forKey:@"leftHanded"];
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.mlgm.pulloverx.settings-changed"),
+                                         NULL, NULL, YES);
+}
+
+-(void)quickSwitchTableViewDidDisappear:(UIView<POQuickSwitchMenuPresenting> *)quickSwitchTableView{
+    [self finishQuickSwitchSessionForMenu:quickSwitchTableView];
+}
+
 
 
 #pragma mark - UIScrollViewDelegate
-
--(BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch{
-    if (gestureRecognizer != closeTapGestureRecognizer) {
-        return YES;
-    }
-
-    // The tap recognizer belongs to the full-screen scroll view, so it also
-    // sees touches delivered to the hosted card. Only accept true background
-    // taps; content and QuickSwitch must keep their own responder/gesture
-    // chain. Handle taps are likewise reserved for POHandle's tap/long-press
-    // recognizers to avoid two close paths racing each other.
-    for (UIView *view = touch.view; view; view = view.superview) {
-        if (view == self.handle ||
-            view == keyboardZoomContainer ||
-            view == self.contentView ||
-            view == contextView ||
-            view == handleScrollView ||
-            view == self.quickSwitchTableView) {
-            return NO;
-        }
-    }
-    return YES;
-}
 
 -(void)scrollViewWillEndDragging:(UIScrollView *)sv
                      withVelocity:(CGPoint)velocity
@@ -1355,13 +3645,10 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
         return;
     }
 
-    // 根据卡片实际行程吸附到展开或闭合状态，不使用整屏分页；快速横向甩动优先，其他情况取最近状态。
     CGFloat projectedOffset = MIN(MAX(0, targetContentOffset->x), maximumOffset);
     BOOL shouldOpen = velocity.x > 0.15 ||
         (velocity.x >= -0.15 && projectedOffset >= maximumOffset / 2.0);
     pendingOpenState = shouldOpen;
-    // 释放后由 snapPanelToOpenState: 统一执行动画。把系统投影钉在“当前帧”
-    // （含过冲值），而不是夹到合法区间——否则系统会先硬跳一帧再动画。
     targetContentOffset->x = sv.contentOffset.x;
     targetContentOffset->y = 0;
 }
@@ -1371,7 +3658,25 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
         [self cancelAutoNubTimer];
     }
     if (sv == scrollView) {
-        // 用户重新触摸会打断已有的程序化滚动，后续由本次拖动结束时重新吸附。
+        BOOL startedClosed = panelState == POPanelStateClosed &&
+            fabs(scrollView.contentOffset.x) <= CLOSED_CONTENT_OFFSET_EPSILON;
+        BOOL interruptedClosing = panelState == POPanelStateClosing;
+        interactiveHostIntentIssued = !startedClosed;
+        interactiveHostResumeRequired = interruptedClosing;
+        POQuickSwitchLayoutMode previousLayoutMode = [self currentQuickSwitchLayoutMode];
+        UIView *handleHandoffSnapshot = nil;
+        if (startedClosed &&
+            [self shouldUsePortraitHostedLandscapeOptimizationForOrientation:
+                [self resolvedHostedLayoutOrientation]]) {
+            handleHandoffSnapshot = [self beginHandleVisualHandoffSnapshot];
+        }
+        panelState = POPanelStateInteractive;
+        if (previousLayoutMode != [self currentQuickSwitchLayoutMode]) {
+            [self applyLayoutPreservingHandlePosition:YES];
+        }
+        if (handleHandoffSnapshot) {
+            [self completeHandleVisualHandoffFromSnapshot:handleHandoffSnapshot];
+        }
         [self addKeyboardZoomSuspension:POKeyboardZoomSuspensionDragging];
         [self restoreKeyboardZoomImmediately];
         scrollSnapAnimationInProgress = NO;
@@ -1388,8 +3693,13 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
         return;
     }
     (void)decelerate;
-    // 即使 UIScrollView 判断会减速，也不要让其用手势速度自行收尾：
-    // snapPanelToOpenState: 会先停止减速，再走固定的点击同款动画。
+    if (pendingOpenState) {
+        if (interactiveHostResumeRequired) {
+            interactiveHostIntentIssued = NO;
+        }
+        [self issueInteractiveHostIntentIfNeeded];
+    }
+    interactiveHostResumeRequired = NO;
     [self snapPanelToOpenState:pendingOpenState];
     [self scheduleFinishPanelDragZoomIfIdle];
 }
@@ -1409,89 +3719,52 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
     if (sv != scrollView) {
         return;
     }
-    scrollSnapAnimationInProgress = NO;
-    if (!pendingOpenState && fabs(scrollView.contentOffset.x) <= CLOSED_CONTENT_OFFSET_EPSILON) {
-        // UIKit 的动画回调后将坐标规范为精确的闭合点；此时才结束托管并
-        // 放开快捷切换，保证视觉和交互状态同步。
-        [scrollView setContentOffset:CGPointZero animated:NO];
-        self.isOpened = NO;
-        [self storeHandlePosition];
-        [self resetAutoNubTimer];
-    } else if (pendingOpenState && [self isLandscapePanelFullyOpenAndIdle]) {
-        [self removeKeyboardZoomSuspension:POKeyboardZoomSuspensionDragging];
-        [self reevaluateKeyboardZoomAnimated:YES];
+    if (!scrollSnapAnimationInProgress) {
+        [self scheduleFinishPanelDragZoomIfIdle];
+        return;
     }
-    [self scheduleFinishPanelDragZoomIfIdle];
+
+    CGFloat targetOffset = pendingOpenState ? [self maximumContentOffsetX] : 0;
+    if (fabs(scrollView.contentOffset.x - targetOffset) <= CLOSED_CONTENT_OFFSET_EPSILON &&
+        fabs(scrollView.contentOffset.y) <= CLOSED_CONTENT_OFFSET_EPSILON) {
+        [self finishPanelSnapToOpenState:pendingOpenState];
+        return;
+    }
+
+    [self snapPanelToOpenState:pendingOpenState];
 }
 
 -(void)scrollViewDidScroll:(UIScrollView *)sv{
     if (sv == scrollView) {
-        // 允许两端过冲；阴影/进度用归一化值，把手收起仍读原始 offset。
-        CGFloat progress = [self horizontalOpenProgress];
-        self.backgroundView.alpha = progress;
+        [self updatePortraitHostedLandscapeHandleForCurrentOffset];
+        [self updateInteractionBackdropsAnimated:NO];
 
-        // 在前 12pt 行程内渐显卡片阴影。闭合时卡片在屏幕外，8pt 阴影也必须完全透明，
-        // 防止边框残影。过冲时 offset 可能 > max，阴影保持满不透明度即可。
         CGFloat shadowProgress = MIN(MAX(sv.contentOffset.x / CONTENT_SHADOW_FADE_DISTANCE, 0), 1);
         shadowView.layer.shadowOpacity = CONTENT_SHADOW_OPACITY * shadowProgress;
 
-        // 卡片刚露出就启动托管，不要等 progress≈1 才 beginHosting。
-        // 否则半拉过程中 stopHosting 后的白底会一直挂到完全展开才刷新。
-        // 关闭仍只在真正回零后的吸附收尾里 endHosting，避免半途反复启停。
-        if (progress >= 0.02f) {
-            if (!self.isOpened) {
-                self.isOpened = YES;
-            }
-        }
-
-        // 手动缩回把手依赖原始横向 offset。上方的归一化进度会限制在 [0, 1]，
-        // 会抹去原实现用于判断越过闭合边缘的负向回弹。
         CGFloat rawOffsetX = sv.contentOffset.x;
-        if (rawOffsetX < -0.5) {
-            if (!self.handle.isNubbed) {
-                self.handle.isNubbed = YES;
-            }
-        } else if (rawOffsetX > 0.5) {
-            if (self.handle.isNubbed) {
-                self.handle.isNubbed = NO;
+        if (panelState == POPanelStateClosing && !scaledProgrammaticCloseAnimating &&
+            !scrollView.dragging && !scrollView.decelerating &&
+            fabs(rawOffsetX) <= CLOSED_CONTENT_OFFSET_EPSILON &&
+            fabs(sv.contentOffset.y) <= CLOSED_CONTENT_OFFSET_EPSILON) {
+            [self finishPanelSnapToOpenState:NO];
+            return;
+        }
+        if (panelState == POPanelStateInteractive && !interactiveHostIntentIssued && rawOffsetX > 0.5) {
+            [self issueInteractiveHostIntentIfNeeded];
+        }
+
+        if (![self isHorizontalQuickSwitchLayoutMode]) {
+            if (rawOffsetX < -0.5) {
+                if (!self.handle.isNubbed) {
+                    self.handle.isNubbed = YES;
+                }
+            } else if (rawOffsetX > 0.5) {
+                if (self.handle.isNubbed) {
+                    self.handle.isNubbed = NO;
+                }
             }
         }
-    }
-}
-
--(void)setIsOpened:(BOOL)isOpened{
-    if (_isOpened == isOpened) {
-        return;
-    }
-    _isOpened = isOpened;
-    
-    if (isOpened) {
-        // The container may contain the last live hosted scene.  Reveal it
-        // only for a real panel-open transition, never merely because a
-        // window/scene orientation callback relaid out the closed overlay.
-        keyboardZoomContainer.hidden = NO;
-        [self removeKeyboardZoomSuspension:POKeyboardZoomSuspensionClosing];
-        [self removeKeyboardZoomSuspension:POKeyboardZoomSuspensionAppSwitch];
-        hostUpdatesAllowed = YES;
-        quickSwitchOpeningApp = NO;
-        [self cancelAutoNubTimer];
-        [self beginHosting];
-    }else{
-        [self addKeyboardZoomSuspension:POKeyboardZoomSuspensionClosing];
-        [self restoreKeyboardZoomImmediately];
-        [self removeKeyboardZoomSuspension:POKeyboardZoomSuspensionDragging];
-        [self removeKeyboardZoomSuspension:POKeyboardZoomSuspensionQuickSwitch];
-        [self removeKeyboardZoomSuspension:POKeyboardZoomSuspensionAppSwitch];
-        keyboardHostLayerPresent = NO;
-        [self.quickSwitchTableView dismissImmediately];
-        [self restoreQuickSwitchContentYieldIfNeededAnimated:NO];
-        [self endHosting];
-        // Do not rely on the off-screen scroll position here.  During a
-        // landscape app's exit SpringBoard rotates this always-present
-        // UIWindow, and an off-screen cached host can otherwise flash as a
-        // full-size white app snapshot for one transaction.
-        keyboardZoomContainer.hidden = YES;
-        [self resetAutoNubTimer];
     }
 }
 
@@ -1501,7 +3774,8 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
 
 -(void)resetAutoNubTimer{
     [self cancelAutoNubTimer];
-    if (![[POApplicationHelper settings][@"autoNub"] boolValue] || self.isOpened || self.handle.isNubbed) {
+    if ([self isHorizontalQuickSwitchLayoutMode] ||
+        ![[POApplicationHelper settings][@"autoNub"] boolValue] || [self isPanelActive] || self.handle.isNubbed) {
         return;
     }
 
@@ -1510,77 +3784,66 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
 }
 
 -(void)autoNubAfterDelay{
-    if ([[POApplicationHelper settings][@"autoNub"] boolValue] && !self.isOpened && !self.handle.isNubbed) {
+    if (![self isHorizontalQuickSwitchLayoutMode] &&
+        [[POApplicationHelper settings][@"autoNub"] boolValue] && ![self isPanelActive] && !self.handle.isNubbed) {
         [self.handle setIsNubbed:YES];
     }
 }
 
 
--(void)beginHosting{
-    if (!hostUpdatesAllowed || pinnedBundleId.length == 0) {
+-(void)layoutExternalSceneStack{
+    if (!externalSceneStack || externalSceneStack.superview != self.contentView) {
         return;
     }
 
-    if (![hostingRequestBundleId isEqualToString:pinnedBundleId]) {
-        [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(beginHosting) object:nil];
-        hostingRequestBundleId = [pinnedBundleId copy];
-        hostingAttempts = 0;
+    UIInterfaceOrientation targetOrientation = [self resolvedHostedLayoutOrientation];
+    CGSize sourceCanvas = hostedKeyboardLayerPresent
+        ? externalSceneStack.bounds.size
+        : [self hostSessionPreferredSystemSceneStackSize:hostSession];
+    if (sourceCanvas.width <= 0 || sourceCanvas.height <= 0) {
+        sourceCanvas = externalSceneStack.bounds.size;
+    }
+    if (sourceCanvas.width <= 0 || sourceCanvas.height <= 0) {
+        return;
     }
 
-    if (![[POApplicationHelper frontMostBundleId] isEqualToString:pinnedBundleId]) {
-        // 切换到不同应用时，暂存旧应用；新内容上屏后再让旧应用进入后台，避免白屏。
-        if (hostedBundleId && ![hostedBundleId isEqualToString:pinnedBundleId]) {
-            pendingBackgroundBundleId = hostedBundleId;
+    UIInterfaceOrientation sourceOrientation = targetOrientation;
+    if (!hostedKeyboardLayerPresent) {
+        sourceOrientation = [[ContextHostManager sharedInstance] currentSystemInterfaceOrientation];
+        if (!POIsConcretePresentationOrientation(sourceOrientation)) {
+            sourceOrientation = self.view.window.windowScene.interfaceOrientation;
         }
-
-        // 每次均从当前图层重新发布场景，包括重新打开同一个应用。这会刷新宿主内容，
-        // 避免图层存在但尚未渲染时宿主永久空白；不要预先清除旧快照，否则会露出白屏。
-        showingCantHost = NO;
-        ContextHostManager *contextManager = [ContextHostManager sharedInstance];
-        [contextManager hostViewForBundleID:pinnedBundleId];
-
-        if (contextView && [hostedBundleId isEqualToString:pinnedBundleId] &&
-            [contextManager isHostingBundleReady:pinnedBundleId]) {
-            // 应用场景已就绪，代理已同步替换为最新内容。
-            hostingAttempts = 0;
-            [activityIndicator stopAnimating];
-            [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(beginHosting) object:nil];
-            return;
-        }
-
-        // 新场景尚未生成时保留旧的可见内容，避免冷启动期间露出空白卡片；新图层
-        // 由代理确认就绪后才会原子替换旧内容。占位画布没有可保留内容，应立即移除。
-        if (!contextView && cantHostCanvas) {
-            [self cleanUpSubviews];
-        }
-        [activityIndicator startAnimating];
-        [self.contentView bringSubviewToFront:activityIndicator];
-        hostingAttempts += 1;
-        // 场景晚于启动请求创建时继续等待；前 6 秒快速重试，之后降为每秒一次。
-        // ContextHostManager 不会重复启动同一应用，因此长期等待不会打断冷启动。
-        NSTimeInterval retryDelay = hostingAttempts <= HOSTING_FAST_RETRY_LIMIT ? 0.5 : 1.0;
-        [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(beginHosting) object:nil];
-        [self performSelector:@selector(beginHosting) withObject:nil afterDelay:retryDelay];
-    }else{
-        [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(beginHosting) object:nil];
-        hostingRequestBundleId = nil;
-        hostingAttempts = 0;
-        [activityIndicator stopAnimating];
-        if (!showingCantHost) {
-            // 固定应用处于前台而无法托管时，让先前展示的应用进入后台、移除实时快照并显示占位内容。
-            ContextHostManager *contextManager = [ContextHostManager sharedInstance];
-            [contextManager stopHosting];
-            if (pendingBackgroundBundleId && ![pendingBackgroundBundleId isEqualToString:pinnedBundleId]) {
-                [contextManager backgroundSceneForBundleId:pendingBackgroundBundleId];
-            }
-            pendingBackgroundBundleId = nil;
-            [self cleanUpSubviews];
-            [contextView removeFromSuperview];
-            contextView = nil;
-            hostedBundleId = nil;
-            [self showCantHostView];
+        if (!POIsConcretePresentationOrientation(sourceOrientation)) {
+            sourceOrientation = sourceCanvas.width > sourceCanvas.height
+                ? UIInterfaceOrientationLandscapeLeft
+                : UIInterfaceOrientationPortrait;
         }
     }
+    if (!POIsConcretePresentationOrientation(targetOrientation)) {
+        targetOrientation = sourceOrientation;
+    }
+    BOOL crossCategory = UIInterfaceOrientationIsLandscape(sourceOrientation) !=
+        UIInterfaceOrientationIsLandscape(targetOrientation);
+    CGSize displayedSourceSize = crossCategory
+        ? CGSizeMake(sourceCanvas.height, sourceCanvas.width)
+        : sourceCanvas;
+    CGFloat targetScale = MIN(CGRectGetWidth(self.contentView.bounds) / MAX(1, displayedSourceSize.width),
+                              CGRectGetHeight(self.contentView.bounds) / MAX(1, displayedSourceSize.height));
+    CGFloat rotationAngle = POPresentationAngleForOrientation(targetOrientation) -
+        POPresentationAngleForOrientation(sourceOrientation);
+    CGAffineTransform transform = CGAffineTransformMakeRotation(rotationAngle);
+    transform = CGAffineTransformScale(transform, targetScale, targetScale);
+    if ([[POApplicationHelper settings][@"leftHanded"] boolValue]) {
+        transform = CGAffineTransformConcat(transform, CGAffineTransformMakeScale(-1.0, 1.0));
+    }
+
+    [UIView performWithoutAnimation:^{
+        externalSceneStack.transform = CGAffineTransformIdentity;
+        externalSceneStack.bounds = (CGRect){CGPointZero, sourceCanvas};
+        externalSceneStack.center = CGPointMake(CGRectGetMidX(self.contentView.bounds),
+                                                CGRectGetMidY(self.contentView.bounds));
+        externalSceneStack.transform = transform;
+    }];
 }
 
 -(void)layoutContextView{
@@ -1589,91 +3852,167 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
     }
 
     BOOL wasAlreadyAttached = contextView.superview == self.contentView;
-    contextView.transform = CGAffineTransformScale(CGAffineTransformIdentity, scale, scale);
-    if ([[POApplicationHelper settings][@"leftHanded"] boolValue]){
-        contextView.transform = CGAffineTransformConcat(contextView.transform, CGAffineTransformMakeScale(-1.0, 1.0));
-    }
-    
     if (!wasAlreadyAttached) {
         [self.contentView addSubview:contextView];
     }
-    
-    CGRect frame = contextView.frame;
-    frame.origin.x = 0;
-    frame.origin.y = 0;
-    frame.size.width = self.contentView.bounds.size.width;
-    frame.size.height = self.contentView.bounds.size.height;
-    contextView.frame = frame;
-    
+
+    CGSize logicalCanvas = [self contextManagerPreferredSceneStackSize:nil];
+    UIInterfaceOrientation targetOrientation = [self resolvedHostedLayoutOrientation];
+
+    CGSize sourceCanvas = presentationSourceCanvasSize;
+    if (sourceCanvas.width <= 0 || sourceCanvas.height <= 0) {
+        sourceCanvas = contextView.bounds.size;
+    }
+    if (sourceCanvas.width <= 0 || sourceCanvas.height <= 0) {
+        sourceCanvas = logicalCanvas;
+    }
+    UIInterfaceOrientation sourceOrientation = POIsConcretePresentationOrientation(presentationSourceOrientation)
+        ? presentationSourceOrientation
+        : targetOrientation;
+
+    BOOL sourceAndTargetCategoriesDiffer =
+        POIsConcretePresentationOrientation(sourceOrientation) &&
+        POIsConcretePresentationOrientation(targetOrientation) &&
+        UIInterfaceOrientationIsLandscape(sourceOrientation) != UIInterfaceOrientationIsLandscape(targetOrientation);
+    CGSize displayedSourceSize = sourceAndTargetCategoriesDiffer
+        ? CGSizeMake(sourceCanvas.height, sourceCanvas.width)
+        : sourceCanvas;
+    CGFloat hostScale = MIN(CGRectGetWidth(self.contentView.bounds) / MAX(1, displayedSourceSize.width),
+                            CGRectGetHeight(self.contentView.bounds) / MAX(1, displayedSourceSize.height));
+
+    CGFloat rotationAngle = 0;
+    if (POIsConcretePresentationOrientation(sourceOrientation) &&
+        POIsConcretePresentationOrientation(targetOrientation)) {
+        rotationAngle = POPresentationAngleForOrientation(targetOrientation) -
+            POPresentationAngleForOrientation(sourceOrientation);
+    }
+    CGAffineTransform transform = CGAffineTransformMakeRotation(rotationAngle);
+    transform = CGAffineTransformScale(transform, hostScale, hostScale);
+    if ([[POApplicationHelper settings][@"leftHanded"] boolValue]) {
+        transform = CGAffineTransformConcat(transform, CGAffineTransformMakeScale(-1.0, 1.0));
+    }
+    [UIView performWithoutAnimation:^{
+        contextView.transform = CGAffineTransformIdentity;
+        contextView.bounds = (CGRect){CGPointZero, sourceCanvas};
+        contextView.center = CGPointMake(CGRectGetMidX(self.contentView.bounds),
+                                         CGRectGetMidY(self.contentView.bounds));
+        contextView.transform = transform;
+    }];
+
     for (UIView *v in contextView.subviews) {
         v.frame = contextView.bounds;
         v.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     }
+    [self layoutExternalSceneStack];
 
     if (wasAlreadyAttached) {
-        contextView.alpha = 1;
+        self->contextView.alpha = 1;
     } else {
         [UIView animateWithDuration:0.3 animations:^{
-            contextView.alpha = 1;
+            self->contextView.alpha = 1;
         }];
     }
 
-    
+    if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26 &&
+        presentationSnapshotView && !presentationSnapshotIsTargetPlaceholder) {
+        [self layoutPresentationSnapshotView];
+    }
 }
 
 -(void)cleanUpSubviews{
-    keyboardHostLayerPresent = NO;
-    // Removing/replacing a hosted scene does not prove that the system
-    // keyboard itself disappeared. Reset to Unknown so a still-present host
-    // layer or the next keyboard notification can positively re-bootstrap
-    // zoom after the scene is attached again.
     keyboardNotificationState = POKeyboardNotificationStateUnknown;
+    hostedKeyboardLayerPresent = NO;
     keyboardHideAnimationInFlight = NO;
+    keyboardStateHostGeneration = 0;
+    keyboardZoomSuppressedForCurrentSession = NO;
     [self restoreKeyboardZoomImmediately];
+    UIView *oldContextView = contextView;
+    if (oldContextView) {
+        [[ContextHostManager sharedInstance] invalidateIOS26PresentationContainersInSceneStack:oldContextView];
+    }
     for (UIView *v in self.contentView.subviews) {
-        if (![v isKindOfClass:[UIActivityIndicatorView class]]) {
-            if (v == cantHostCanvas) {
-                cantHostCanvas = nil;
-                cantHostIconView = nil;
-                cantHostLabel = nil;
-            }
-            [v removeFromSuperview];
+        if (v == cantHostCanvas) {
+            cantHostCanvas = nil;
+            cantHostIconView = nil;
+            cantHostLabel = nil;
         }
+        [v removeFromSuperview];
     }
-    // 键盘栈挂在 contextView 内，随之被移除，指针一并清空避免悬空
-    externalSceneStack = nil;
-}
-
--(void)endHosting{
-    keyboardHostLayerPresent = NO;
-    keyboardNotificationState = POKeyboardNotificationStateUnknown;
-    keyboardHideAnimationInFlight = NO;
-    [self restoreKeyboardZoomImmediately];
-    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(beginHosting) object:nil];
-    hostingRequestBundleId = nil;
-    hostingAttempts = 0;
-    [activityIndicator stopAnimating];
-    showingCantHost = NO;
-    // 闭合时禁止宿主替换，避免延迟图层 KVO 销毁或替换保留视图；下次展开时重新允许。
-    hostUpdatesAllowed = NO;
-
-    // 关闭面板必须结束当前托管会话：否则被托管 App 会持续处于 PullOver 强制的
-    // 前台状态，与用户正在使用的主 App 争夺场景状态，表现为关闭后应用卡死。
-    ContextHostManager *contextManager = [ContextHostManager sharedInstance];
-    [contextManager stopHosting];
-    if (pendingBackgroundBundleId && ![pendingBackgroundBundleId isEqualToString:[POApplicationHelper frontMostBundleId]]) {
-        [contextManager backgroundSceneForBundleId:pendingBackgroundBundleId];
+    if (oldContextView) {
+        contextView = nil;
+        presentationBundleId = nil;
+        presentationSceneIdentity = nil;
+        presentationCanvasSize = CGSizeZero;
+        presentationOrientation = UIInterfaceOrientationUnknown;
+        presentationSourceCanvasSize = CGSizeZero;
+        presentationSourceOrientation = UIInterfaceOrientationUnknown;
+        presentationRetainedAfterRelease = NO;
     }
-    pendingBackgroundBundleId = nil;
-
-    // 关闭时释放键盘/外部图层栈，键盘图层与前台 App 共享，不还回去不回收
+    [self clearPresentationSnapshot];
     if (externalSceneStack) {
         [externalSceneStack removeFromSuperview];
         externalSceneStack = nil;
     }
+}
 
-    // 此处不能销毁托管视图。保留 contentView 内的场景栈可让下次拖出时直接显示实时内容，
-    // 而不是白底和加载指示器；仅在切换到不同应用时由 beginHosting 延迟替换旧场景。
+-(void)forceCloseAndReleaseImmediately{
+    deferredOpenGeneration += 1;
+    [self cancelAutoNubTimer];
+    scrollSnapAnimationInProgress = NO;
+    scaledProgrammaticCloseAnimating = NO;
+    scaledProgrammaticCloseNeedsLayout = NO;
+    deferScaledCloseSessionCleanup = NO;
+    [keyboardZoomContainer.layer removeAllAnimations];
+    [handleScrollView.layer removeAllAnimations];
+    panelPanIntent = POPanelPanIntentNone;
+    pendingOpenState = NO;
+    interactiveHostIntentIssued = NO;
+    interactiveHostResumeRequired = NO;
+    quickSwitchOpeningApp = NO;
+    POQuickSwitchLayoutMode previousLayoutMode = [self currentQuickSwitchLayoutMode];
+    CGFloat inheritedHandleScreenY = NAN;
+    if (previousLayoutMode == POQuickSwitchLayoutModeHorizontalBottom) {
+        CGRect handleInView = [handleScrollView convertRect:self.handle.frame toView:self.view];
+        if (!CGRectIsEmpty(handleInView) && isfinite(CGRectGetMinY(handleInView))) {
+            inheritedHandleScreenY = CGRectGetMinY(handleInView);
+        }
+    }
+    panelState = POPanelStateClosed;
+    [scrollView setContentOffset:CGPointZero animated:NO];
+    if (previousLayoutMode != [self currentQuickSwitchLayoutMode]) {
+        [self applyLayoutPreservingHandlePosition:YES];
+        [self inheritVerticalHandleScreenY:inheritedHandleScreenY];
+        [self storeHandlePosition];
+    }
+    shadowView.layer.shadowOpacity = 0;
+    [self dismissTransientInteractionUI];
+    showingCantHost = NO;
+    if (origOffset && handleScrollView) {
+        [handleScrollView setContentOffset:CGPointMake(0, [self clampedHandleOffset:origOffset.floatValue]) animated:NO];
+        if (self.handle) {
+            [self storeHandlePosition];
+        }
+    }
+    origOffset = nil;
+    keyboardNotificationState = POKeyboardNotificationStateUnknown;
+    hostedKeyboardLayerPresent = NO;
+    keyboardHideAnimationInFlight = NO;
+    keyboardStateHostGeneration = 0;
+    keyboardZoomSuppressedForCurrentSession = NO;
+    [self restoreKeyboardZoomImmediately];
+    keyboardZoomSuspensionReasons = POKeyboardZoomSuspensionNone;
+    [self hidePresentationContainer];
+    [hostSession invalidate];
+    [[POSplitSessionController sharedInstance] end];
+    [self cleanUpSubviews];
+    presentationBundleId = nil;
+    presentationSceneIdentity = nil;
+    presentationCanvasSize = CGSizeZero;
+    presentationOrientation = UIInterfaceOrientationUnknown;
+    presentationSourceCanvasSize = CGSizeZero;
+    presentationSourceOrientation = UIInterfaceOrientationUnknown;
+    presentationRetainedAfterRelease = NO;
+    [self updateInteractionBackdropsAnimated:NO];
 }
 
 -(void)showCantHostView{
@@ -1687,8 +4026,6 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
     }
 
     if (!cantHostCanvas) {
-        // 应用已打开、无法托管时显示扫描图标占位；它与宿主场景一样位于真实方向
-        // 的逻辑画布，不使用已缩放的卡片坐标。
         cantHostCanvas = [[UIView alloc] initWithFrame:CGRectZero];
         cantHostCanvas.backgroundColor = [UIColor clearColor];
         [self.contentView addSubview:cantHostCanvas];
@@ -1710,6 +4047,8 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
         cantHostLabel.text = POLocalizedString(@"The current app is already open and can't be shown.", @"Tweak");
         [cantHostCanvas addSubview:cantHostLabel];
     }
+    cantHostCanvas.hidden = NO;
+    [self.contentView bringSubviewToFront:cantHostCanvas];
     [self layoutCantHostView];
 }
 
@@ -1718,8 +4057,6 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
         return;
     }
 
-    // 与 layoutContextView 保持一致：先让竖屏坐标画布填满卡片，再整体等比缩放，
-    // 解决横屏下占位图标与文字过大或被横向裁剪的问题。
     cantHostCanvas.transform = CGAffineTransformScale(CGAffineTransformIdentity, scale, scale);
     if ([[POApplicationHelper settings][@"leftHanded"] boolValue]){
         cantHostCanvas.transform = CGAffineTransformConcat(cantHostCanvas.transform, CGAffineTransformMakeScale(-1.0, 1.0));
@@ -1736,79 +4073,287 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
     cantHostLabel.center = CGPointMake(width/2.0, CGRectGetMaxY(cantHostIconView.frame) + 32);
 }
 
-#pragma mark - ExternalSceneDelegate
+#pragma mark - POHostSessionControllerDelegate
 
--(void)contextManager:(id)manager scene:(FBScene *)scene sceneStackDidChange:(UIView *)sceneStack{
-    if (!hostUpdatesAllowed ||
-        ![(ContextHostManager *)manager isHostingScene:scene forBundleId:pinnedBundleId]) {
+-(void)hostSessionController:(POHostSessionController *)controller
+hostedPresentationContentDidBecomeUnavailableForBundleId:(NSString *)bundleId
+                    generation:(NSUInteger)generation{
+    if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion < 26 ||
+        controller != hostSession || generation != controller.currentGeneration ||
+        ![bundleId isEqualToString:controller.requestedBundleId] ||
+        panelState == POPanelStateClosed || panelState == POPanelStateClosing ||
+        !runtimeCategoryTransitionSnapshotFallbackArmed ||
+        !presentationSnapshotView ||
+        ![presentationSnapshotBundleId isEqualToString:bundleId]) {
         return;
     }
-    if (!sceneStack) {
+    [self showRuntimeCategoryTransitionSnapshotFallback];
+}
+
+-(CGSize)hostSessionPreferredSceneStackSize:(POHostSessionController *)controller{
+    return [self contextManagerPreferredSceneStackSize:nil];
+}
+
+-(UIInterfaceOrientation)hostSessionPreferredHostedInterfaceOrientation:(POHostSessionController *)controller{
+    return [self contextManagerPreferredHostedInterfaceOrientation:nil];
+}
+
+-(void)hostSessionController:(POHostSessionController *)controller
+hostedInterfaceOrientationDidChange:(UIInterfaceOrientation)orientation
+   systemAnimationParameters:(id)animationParameters
+                      bundleId:(NSString *)bundleId
+                    generation:(NSUInteger)generation{
+    if (![bundleId isEqualToString:controller.requestedBundleId] || generation != controller.currentGeneration ||
+        panelState == POPanelStateClosed || panelState == POPanelStateClosing) {
+        return;
+    }
+    BOOL layoutOrientationKnown = hostedLayoutOrientation == UIInterfaceOrientationPortrait ||
+        hostedLayoutOrientation == UIInterfaceOrientationPortraitUpsideDown ||
+        UIInterfaceOrientationIsLandscape(hostedLayoutOrientation);
+    if (layoutOrientationKnown &&
+        UIInterfaceOrientationIsLandscape(hostedLayoutOrientation) == UIInterfaceOrientationIsLandscape(orientation)) {
         return;
     }
 
-    // A fresh scene stack is followed by the external-stack callback in the
-    // same publication pass. Do not carry the previous app's keyboard fact
-    // into the new scene while that replacement is in flight.
-    keyboardHostLayerPresent = NO;
+    BOOL hasPreRotationSnapshot = presentationSnapshotView && !presentationSnapshotIsTargetPlaceholder &&
+        [presentationSnapshotBundleId isEqualToString:bundleId] &&
+        (presentationSnapshotOrientation == UIInterfaceOrientationPortrait ||
+         presentationSnapshotOrientation == UIInterfaceOrientationPortraitUpsideDown ||
+         UIInterfaceOrientationIsLandscape(presentationSnapshotOrientation)) &&
+        UIInterfaceOrientationIsLandscape(presentationSnapshotOrientation) != UIInterfaceOrientationIsLandscape(orientation);
+    if (hasPreRotationSnapshot) {
+        runtimeCategoryTransitionSnapshotActive = YES;
+    }
 
-    // 先挂上新栈，再移除旧栈/占位，避免 cleanUpSubviews 先拆光造成一帧白底。
-    UIView *previousContextView = contextView;
-    UIView *previousCantHostCanvas = cantHostCanvas;
-    contextView = sceneStack;
-    // 同实例刷新时不要走“新建淡入”，直接保持可见。
-    if (previousContextView == sceneStack) {
-        [self layoutContextView];
-    } else {
-        sceneStack.alpha = 1;
-        [self layoutContextView];
-        if (previousContextView && previousContextView.superview) {
-            [previousContextView removeFromSuperview];
-        }
-        if (previousCantHostCanvas && previousCantHostCanvas.superview) {
-            [previousCantHostCanvas removeFromSuperview];
-            if (cantHostCanvas == previousCantHostCanvas) {
-                cantHostCanvas = nil;
-                cantHostIconView = nil;
-                cantHostLabel = nil;
+    UIInterfaceOrientation previousLayoutOrientation = hostedLayoutOrientation;
+    CGFloat previousBackdropAlpha = panelBackdropView.alpha;
+    [self dismissTransientInteractionUI];
+
+    hostedLayoutOrientation = orientation;
+    hostedCategoryTransitionPending = YES;
+    [self updateInteractionBackdropsAnimated:NO];
+    [self addKeyboardZoomSuspension:POKeyboardZoomSuspensionRotation];
+    [self restoreKeyboardZoomImmediately];
+
+    BOOL transitionAnimated =
+        [self beginRuntimeHostedCategoryTransitionFromOrientation:previousLayoutOrientation
+                                                    toOrientation:orientation
+                                            startingBackdropAlpha:previousBackdropAlpha
+                                         systemAnimationParameters:animationParameters];
+    hostedCategoryTransitionPending = NO;
+    if (!transitionAnimated) {
+        [self applyLayoutPreservingHandlePosition:YES];
+        ContextHostManager *manager = [ContextHostManager sharedInstance];
+        UIInterfaceOrientation sourceOrientation =
+            manager.currentHostedPresentationSourceOrientation;
+        BOOL sourceNeedsCanonicalization =
+            POIsConcretePresentationOrientation(sourceOrientation) &&
+            POIsConcretePresentationOrientation(orientation) &&
+            UIInterfaceOrientationIsLandscape(sourceOrientation) !=
+                UIInterfaceOrientationIsLandscape(orientation);
+        if (sourceNeedsCanonicalization) {
+            if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion == 15) {
+                runtimeScenePublicationStaging = YES;
+                [manager canonicalizeHostedSourceForCurrentOrientationWithGeneration:generation];
+                runtimeScenePublicationStaging = NO;
+            } else {
+                BOOL snapshotReady =
+                    [self prepareRuntimeCategoryTransitionSnapshotFromSourceOrientation:sourceOrientation];
+                if (snapshotReady) {
+                    [self retargetRuntimeCategoryTransitionSnapshotForOrientation:orientation];
+                }
+                BOOL canonicalizationStarted =
+                    [manager canonicalizeHostedSourceForCurrentOrientationWithGeneration:generation];
+                if (snapshotReady && !canonicalizationStarted) {
+                    [self clearPresentationSnapshot];
+                }
             }
         }
     }
-
-    hostedBundleId = pinnedBundleId;
-    hostingAttempts = 0;
-    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(beginHosting) object:nil];
-    showingCantHost = NO;
-    [activityIndicator stopAnimating];
-    [self.contentView bringSubviewToFront:contextView];
-
-    // 新应用内容已上屏，此时再让切换前应用进入后台，切换过程不会露出白屏。
-    if (pendingBackgroundBundleId && ![pendingBackgroundBundleId isEqualToString:pinnedBundleId]) {
-        [[ContextHostManager sharedInstance] backgroundSceneForBundleId:pendingBackgroundBundleId];
+    if (hasPreRotationSnapshot && presentationSnapshotView &&
+        [presentationSnapshotBundleId isEqualToString:bundleId]) {
+        [self retargetRuntimeCategoryTransitionSnapshotForOrientation:orientation];
+        runtimeCategoryTransitionSnapshotActive = YES;
     }
-    pendingBackgroundBundleId = nil;
+    if (contextView && !presentationRetainedAfterRelease &&
+        [presentationBundleId isEqualToString:bundleId] &&
+        [controller.activeBundleId isEqualToString:bundleId]) {
+        presentationCanvasSize = [self contextManagerPreferredSceneStackSize:nil];
+        presentationOrientation = orientation;
+        contextView.hidden = NO;
+        [self.contentView bringSubviewToFront:contextView];
+        if (presentationSnapshotView && !presentationSnapshotView.hidden &&
+            presentationSnapshotView.superview == self.contentView) {
+            [self.contentView bringSubviewToFront:presentationSnapshotView];
+        }
+    }
+    if (!transitionAnimated) {
+        [self removeKeyboardZoomSuspension:POKeyboardZoomSuspensionRotation];
+        [self reevaluateKeyboardZoomAnimated:NO];
+    }
+
 }
 
-
--(void)contextManager:(id)manager
-                scene:(FBScene *)scene
-externalSceneStackDidChange:(UIView *)sceneStack
-   containsKeyboardLayer:(BOOL)containsKeyboardLayer{
-    if (!hostUpdatesAllowed ||
-        ![(ContextHostManager *)manager isHostingScene:scene forBundleId:pinnedBundleId]) {
+-(void)hostSessionController:(POHostSessionController *)controller
+             didPublishScene:(FBScene *)scene
+                 sceneStack:(UIView *)sceneStack
+                   bundleId:(NSString *)bundleId
+                 generation:(NSUInteger)generation{
+    if (!sceneStack || generation != controller.currentGeneration ||
+        ![bundleId isEqualToString:controller.requestedBundleId]) {
         return;
     }
 
-    keyboardHostLayerPresent = containsKeyboardLayer;
-    // Host-layer publication can race the keyboard notifications. A positive
-    // result bootstraps a controller created while the keyboard was already
-    // visible; a negative result never overrides a visible notification,
-    // because the layer manager is allowed to publish one frame late.
-    if (containsKeyboardLayer && keyboardNotificationState == POKeyboardNotificationStateUnknown) {
+    BOOL usesIOS15LiveRuntimeScenePublication =
+        NSProcessInfo.processInfo.operatingSystemVersion.majorVersion == 15 &&
+        (runtimeHostedCategoryTransitionAnimating || runtimeScenePublicationStaging);
+    if (runtimeHostedCategoryTransitionAnimating && !runtimeScenePublicationStaging &&
+        !usesIOS15LiveRuntimeScenePublication) {
+        deferredRuntimePublishedScene = scene;
+        deferredRuntimePublishedSceneStack = sceneStack;
+        deferredRuntimePublishedBundleId = [bundleId copy];
+        deferredRuntimePublishedGeneration = generation;
+        if (runtimeCategoryTransitionSnapshotActive) {
+            [self scheduleRuntimeScenePublicationStagingIfNeeded];
+        }
+        return;
+    }
+
+    if (![bundleId isEqualToString:pinnedBundleId]) {
+        [self commitPinnedBundleId:bundleId];
+    }
+
+    if (keyboardStateHostGeneration != generation) {
+        keyboardStateHostGeneration = generation;
+        keyboardNotificationState = POKeyboardNotificationStateUnknown;
+        hostedKeyboardLayerPresent = NO;
+        keyboardHideAnimationInFlight = NO;
+        keyboardZoomSuppressedForCurrentSession = NO;
+    }
+
+    UIView *previousContextView = contextView;
+    UIView *previousCantHostCanvas = cantHostCanvas;
+    BOOL replacingVisibleMainStack = previousContextView && previousContextView != sceneStack &&
+        previousContextView.superview == self.contentView && !previousContextView.hidden &&
+        !presentationSnapshotView && panelState != POPanelStateClosed;
+    if (replacingVisibleMainStack && !usesIOS15LiveRuntimeScenePublication) {
+        [self capturePresentationSnapshotIfPossible];
+        if (presentationSnapshotView) {
+            presentationSnapshotView.hidden = NO;
+        }
+    }
+    UIInterfaceOrientation currentHostedOrientation = [self contextManagerPreferredHostedInterfaceOrientation:nil];
+    ContextHostManager *manager = [ContextHostManager sharedInstance];
+    UIInterfaceOrientation publishedSourceOrientation =
+        [manager publishedSourceOrientationForScene:scene];
+    CGSize publishedSourceCanvas = [manager publishedSourceCanvasSizeForScene:scene];
+    if (POIsConcretePresentationOrientation(publishedSourceOrientation) &&
+        publishedSourceCanvas.width > 0 && publishedSourceCanvas.height > 0) {
+        presentationSourceOrientation = publishedSourceOrientation;
+        presentationSourceCanvasSize = publishedSourceCanvas;
+    } else if (presentationSourceCanvasSize.width <= 0 || presentationSourceCanvasSize.height <= 0 ||
+               !POIsConcretePresentationOrientation(presentationSourceOrientation)) {
+        UIInterfaceOrientation sourceOrientation =
+            [manager preferredHostedInterfaceOrientationForBundleId:bundleId];
+        if (!POIsConcretePresentationOrientation(sourceOrientation)) {
+            sourceOrientation = currentHostedOrientation;
+        }
+        presentationSourceCanvasSize = sceneStack.bounds.size;
+        presentationSourceOrientation = sourceOrientation;
+    }
+
+    presentationBundleId = [bundleId copy];
+    presentationSceneIdentity = scene;
+    presentationCanvasSize = [self contextManagerPreferredSceneStackSize:nil];
+    presentationOrientation = currentHostedOrientation;
+
+    contextView = sceneStack;
+    sceneStack.hidden = NO;
+    sceneStack.alpha = 1;
+
+    BOOL layoutOrientationKnown = POIsConcretePresentationOrientation(hostedLayoutOrientation);
+    BOOL publishedOrientationKnown = POIsConcretePresentationOrientation(currentHostedOrientation);
+    BOOL layoutCategoryMismatch = publishedOrientationKnown &&
+        (!layoutOrientationKnown ||
+         UIInterfaceOrientationIsLandscape(hostedLayoutOrientation) !=
+             UIInterfaceOrientationIsLandscape(currentHostedOrientation));
+    BOOL pendingRuntimeOrientationHandoff =
+        [manager hasPendingRuntimeOrientationHandoffForScene:scene generation:generation];
+    if (layoutCategoryMismatch && panelState != POPanelStateClosed &&
+        panelState != POPanelStateClosing && !pendingRuntimeOrientationHandoff) {
+        [self addKeyboardZoomSuspension:POKeyboardZoomSuspensionRotation];
+        [self restoreKeyboardZoomImmediately];
+        [self applyLayoutPreservingHandlePosition:YES];
+        [self removeKeyboardZoomSuspension:POKeyboardZoomSuspensionRotation];
+        [self reevaluateKeyboardZoomAnimated:NO];
+    } else if (!pendingRuntimeOrientationHandoff) {
+        [self layoutContextView];
+    }
+    [self reconcilePresentedContainerGeometry];
+
+    if (previousContextView && previousContextView != sceneStack && previousContextView.superview) {
+        [manager invalidateIOS26PresentationContainersInSceneStack:previousContextView];
+        [previousContextView removeFromSuperview];
+    }
+    if (previousCantHostCanvas && previousCantHostCanvas.superview) {
+        [previousCantHostCanvas removeFromSuperview];
+    }
+    if (cantHostCanvas == previousCantHostCanvas) {
+        cantHostCanvas = nil;
+        cantHostIconView = nil;
+        cantHostLabel = nil;
+    }
+
+    presentationRetainedAfterRelease = NO;
+    showingCantHost = NO;
+    [self.contentView bringSubviewToFront:contextView];
+
+    if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26 &&
+        runtimeCategoryTransitionSnapshotActive && presentationSnapshotView &&
+        !presentationSnapshotIsTargetPlaceholder &&
+        [presentationSnapshotBundleId isEqualToString:bundleId] &&
+        presentationSnapshotSceneIdentity == scene) {
+        UIInterfaceOrientation snapshotTargetOrientation = currentHostedOrientation;
+        [self retargetRuntimeCategoryTransitionSnapshotForOrientation:snapshotTargetOrientation];
+    }
+
+    BOOL snapshotCanBridgeHandoff = presentationSnapshotView && !presentationSnapshotView.hidden &&
+        [self hasCompatiblePresentationSnapshotForBundleId:bundleId];
+    BOOL snapshotCanRemainForOrientationHandoff = presentationSnapshotView &&
+        !presentationSnapshotIsTargetPlaceholder && runtimeCategoryTransitionSnapshotFallbackArmed &&
+        [presentationSnapshotBundleId isEqualToString:bundleId] &&
+        (!presentationSnapshotSceneIdentity || presentationSnapshotSceneIdentity == scene);
+    if (snapshotCanBridgeHandoff || snapshotCanRemainForOrientationHandoff) {
+        presentationSnapshotView.hidden = NO;
+        presentationSnapshotView.alpha = 1.0;
+        [self layoutPresentationSnapshotView];
+        [self.contentView bringSubviewToFront:presentationSnapshotView];
+        [self schedulePresentationSnapshotRetirementForBundleId:bundleId generation:generation];
+    } else if (presentationSnapshotView) {
+        [self clearPresentationSnapshot];
+    }
+
+    [self completeExternallyActivatedApplicationIfNeeded:bundleId];
+}
+
+-(void)hostSessionController:(POHostSessionController *)controller
+             didPublishScene:(FBScene *)scene
+          externalSceneStack:(UIView *)sceneStack
+       containsKeyboardLayer:(BOOL)containsKeyboardLayer
+                   bundleId:(NSString *)bundleId
+                 generation:(NSUInteger)generation{
+    if (generation != controller.currentGeneration ||
+        ![bundleId isEqualToString:controller.requestedBundleId]) {
+        return;
+    }
+
+    hostedKeyboardLayerPresent = containsKeyboardLayer;
+    if (containsKeyboardLayer &&
+        keyboardNotificationState == POKeyboardNotificationStateUnknown &&
+        !keyboardHideAnimationInFlight) {
         keyboardNotificationState = POKeyboardNotificationStateVisible;
         keyboardHideAnimationInFlight = NO;
     } else if (!containsKeyboardLayer) {
-        keyboardHideAnimationInFlight = NO;
         if (keyboardNotificationState == POKeyboardNotificationStateUnknown) {
             keyboardNotificationState = POKeyboardNotificationStateHidden;
         }
@@ -1819,17 +4364,57 @@ externalSceneStackDidChange:(UIView *)sceneStack
         return;
     }
 
-    // 每次按键都会重新发布键盘/外部栈，替换而非累积，避免多个宿主抢占共享图层。
     if (externalSceneStack && externalSceneStack != sceneStack) {
         [externalSceneStack removeFromSuperview];
     }
     externalSceneStack = sceneStack;
     if (sceneStack.subviews.count > 0) {
-        [contextView addSubview:sceneStack];
+        [self.contentView addSubview:sceneStack];
+        [self layoutExternalSceneStack];
+        [self.contentView bringSubviewToFront:sceneStack];
+        if (presentationSnapshotView && !presentationSnapshotView.hidden &&
+            presentationSnapshotView.superview == self.contentView) {
+            [self.contentView bringSubviewToFront:presentationSnapshotView];
+        }
     }
-    [self removeKeyboardZoomSuspension:POKeyboardZoomSuspensionAppSwitch];
     [self reevaluateKeyboardZoomAnimated:YES];
+    [self completeExternallyActivatedApplicationIfNeeded:bundleId];
 }
 
+-(void)hostSessionController:(POHostSessionController *)controller
+cannotHostFrontmostBundleId:(NSString *)bundleId
+                  generation:(NSUInteger)generation{
+    if ([externallyActivatedBundleId isEqualToString:bundleId]) {
+        [self restoreExternallyActivatedApplicationNatively:bundleId];
+        return;
+    }
+    BOOL pendingExternalRoute = pinnedBundleId.length > 0 &&
+        ![bundleId isEqualToString:pinnedBundleId];
+    if (pendingExternalRoute) {
+        if (presentationSnapshotIsTargetPlaceholder &&
+            [presentationSnapshotBundleId isEqualToString:bundleId]) {
+            [self clearPresentationSnapshot];
+        }
+        [hostSession activateBundleId:pinnedBundleId];
+        return;
+    }
+    if (![bundleId isEqualToString:pinnedBundleId]) {
+        return;
+    }
+    [[POSplitSessionController sharedInstance] end];
+    [self cleanUpSubviews];
+    presentationBundleId = nil;
+    presentationSceneIdentity = nil;
+    presentationCanvasSize = CGSizeZero;
+    presentationOrientation = UIInterfaceOrientationUnknown;
+    presentationSourceCanvasSize = CGSizeZero;
+    presentationSourceOrientation = UIInterfaceOrientationUnknown;
+    presentationRetainedAfterRelease = NO;
+    if (panelState != POPanelStateClosed) {
+        keyboardZoomContainer.hidden = NO;
+        [self showCantHostView];
+    }
+    [self reevaluateKeyboardZoomAnimated:NO];
+}
 
 @end

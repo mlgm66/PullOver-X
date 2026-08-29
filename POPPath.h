@@ -13,7 +13,6 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// Resolves a canonical rootful path for the jailbreak scheme used to build this binary.
 NS_INLINE NSString *POPPath(NSString *path) {
 #if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
     return jbroot(path);

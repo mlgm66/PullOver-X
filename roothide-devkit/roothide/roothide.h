@@ -25,7 +25,7 @@ const char* jbrootat_alloc(int fd, const char* path); /* free after use */
 //
 
 /* get the system-wide random value of current jailbreak state */
-unsigned long long jbrand();
+unsigned long long jbrand(void);
 
 /* convert jbroot-based path to rootfs-based path (auto cache) */
 const char* jbroot(const char* path);

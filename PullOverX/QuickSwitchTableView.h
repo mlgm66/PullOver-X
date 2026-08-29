@@ -10,28 +10,52 @@
 #import "POApplicationHelper.h"
 #import "QuickSwitchTableViewCell.h"
 
-@class QuickSwitchTableView;
-@protocol QuickSwitchSelectionDelegate <NSObject>
+@protocol QuickSwitchSelectionDelegate;
 
-@optional
-// 展开态菜单避让卡片时读取 contentView frame。
--(UIView *)quickSwitchContentViewForLayout;
+typedef NS_ENUM(NSUInteger, POQuickSwitchEntryKind) {
+    POQuickSwitchEntryKindApplication,
+    POQuickSwitchEntryKindPreviousPage,
+    POQuickSwitchEntryKindNextPage,
+};
 
-@required
--(void)quickSwitchTableViewWillAppear:(QuickSwitchTableView *)quickSwitchTableView;
--(void)quickSwitchTableView:(QuickSwitchTableView *)quickSwitchTableView didSelectBundleId:(NSString *)bundleId;
--(void)quickSwitchTableView:(QuickSwitchTableView *)quickSwitchTableView draggingDidChangeForQuickSwitchItem:(id)item withPoint:(CGPoint)point;
--(void)quickSwitchTableView:(QuickSwitchTableView *)quickSwitchTableView didDropApp:(SBApplication *)app atPoint:(CGPoint)point;
--(void)draggingDidEnterBoundsOfQuickSwitchTableView:(QuickSwitchTableView *)quickSwitchTableView;
--(void)quickSwitchTableViewDidDisappear:(QuickSwitchTableView *)quickSwitchTableView;
-
+@interface POQuickSwitchEntry : NSObject
+@property (nonatomic, readonly) POQuickSwitchEntryKind kind;
+@property (nonatomic, copy, readonly) NSString *bundleIdentifier;
++ (instancetype)applicationEntryWithBundleIdentifier:(NSString *)bundleIdentifier;
++ (instancetype)previousPageEntry;
++ (instancetype)nextPageEntry;
 @end
 
+FOUNDATION_EXPORT NSArray<NSArray<POQuickSwitchEntry *> *> *POQuickSwitchBuildPages(
+    NSArray<NSString *> *bundleIdentifiers,
+    NSUInteger slotCount
+);
 
-@interface QuickSwitchTableView : UITableView <UITableViewDelegate, UITableViewDataSource>
-@property (nonatomic, weak) id <QuickSwitchSelectionDelegate> selectionDelegate;
--(void)presentFromHandle:(UIView *)handle withRecognizer:(UILongPressGestureRecognizer *)recognizer;
+@interface POQuickSwitchSelectionFeedback : NSObject
+-(void)configureWithHapticsEnabled:(BOOL)hapticsEnabled soundEnabled:(BOOL)soundEnabled;
+-(void)prepare;
+-(void)selectionChanged;
+@end
+
+@protocol POQuickSwitchMenuPresenting <NSObject>
+@property (nonatomic, weak) id<QuickSwitchSelectionDelegate> selectionDelegate;
+-(BOOL)presentFromHandle:(UIView *)handle withRecognizer:(UILongPressGestureRecognizer *)recognizer;
 -(void)dismissImmediately;
 -(void)refreshLayoutDirection;
+@end
 
+@protocol QuickSwitchSelectionDelegate <NSObject>
+@required
+-(void)quickSwitchTableViewWillAppear:(UIView<POQuickSwitchMenuPresenting> *)quickSwitchTableView;
+-(void)quickSwitchTableView:(UIView<POQuickSwitchMenuPresenting> *)quickSwitchTableView didHoverBundleId:(NSString *)bundleId;
+-(void)quickSwitchTableViewDidClearHover:(UIView<POQuickSwitchMenuPresenting> *)quickSwitchTableView;
+-(void)quickSwitchTableView:(UIView<POQuickSwitchMenuPresenting> *)quickSwitchTableView didSelectBundleId:(NSString *)bundleId;
+-(void)quickSwitchTableView:(UIView<POQuickSwitchMenuPresenting> *)quickSwitchTableView draggingDidChangeForQuickSwitchItem:(id)item withPoint:(CGPoint)point;
+-(void)quickSwitchTableView:(UIView<POQuickSwitchMenuPresenting> *)quickSwitchTableView didDropApp:(SBApplication *)app atPoint:(CGPoint)point;
+-(void)draggingDidEnterBoundsOfQuickSwitchTableView:(UIView<POQuickSwitchMenuPresenting> *)quickSwitchTableView;
+-(void)quickSwitchTableViewDidDisappear:(UIView<POQuickSwitchMenuPresenting> *)quickSwitchTableView;
+@end
+
+@interface QuickSwitchTableView : UITableView <UITableViewDelegate, UITableViewDataSource, POQuickSwitchMenuPresenting>
+@property (nonatomic, weak) id<QuickSwitchSelectionDelegate> selectionDelegate;
 @end

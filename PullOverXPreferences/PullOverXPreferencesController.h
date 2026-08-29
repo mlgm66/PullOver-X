@@ -9,17 +9,11 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <Preferences/Preferences.h>
-#import <L360Confetti/L360ConfettiArea.h>
 #import "POApplicationHelper.h"
 
-@interface PullOverXPreferencesController : PSListController <L360ConfettiAreaDelegate>
-
-@property(nonatomic, strong) L360ConfettiArea *confettiArea;
--(void)burst;
+@interface PullOverXPreferencesController : PSListController
 
 - (id)getValueForSpecifier:(PSSpecifier*)specifier;
 - (void)setValue:(id)value forSpecifier:(PSSpecifier*)specifier;
-- (void)followOnTwitter:(PSSpecifier*)specifier;
-- (void)makeDonation:(PSSpecifier*)specifier;
 
 @end

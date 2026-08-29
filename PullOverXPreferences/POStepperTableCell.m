@@ -4,9 +4,7 @@
 #import <Preferences/PSControlTableCell.h>
 #import "../POLocalization.h"
 
-@interface POStepperTableCell : PSControlTableCell {
-	NSString *title;
-}
+@interface POStepperTableCell : PSControlTableCell
 @property (nonatomic, retain) UIStepper *control;
 @end
 
@@ -24,16 +22,18 @@
 
 - (void)refreshCellContentsWithSpecifier:(PSSpecifier *)specifier {
 	[super refreshCellContentsWithSpecifier:specifier];
-	title = [specifier propertyForKey:@"label"];
+	self.control.frame = CGRectMake(0, 0, 96, 32);
+	self.accessoryView = self.control;
 	[self _updateLabel];
 }
 
 - (UIStepper *)newControl {
-	UIStepper *stepper = [[UIStepper alloc] initWithFrame:CGRectZero];
+	UIStepper *stepper = [[UIStepper alloc] initWithFrame:CGRectMake(0, 0, 96, 32)];
 	stepper.continuous = NO;
 	stepper.value = 1;
 	stepper.minimumValue = 1;
 	stepper.maximumValue = 99;
+	stepper.autoresizingMask = UIViewAutoresizingNone;
 	return stepper;
 }
 

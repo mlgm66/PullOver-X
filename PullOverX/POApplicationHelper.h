@@ -10,31 +10,23 @@
 
 #import "headers.h"
 
-@interface NSString (MyAdditions)
-- (NSString *)md5;
-@end
-
-@interface NSData (MyAdditions)
-- (NSString *)md5;
-@end
-
-
 @interface POApplicationHelper : NSObject
 
-+(NSArray *)recentAppsWithCount:(int)count;
-+(UIImage *)imageForBundleId:(NSString *)bundleId;
-+(NSString *)frontMostBundleId;
++ (NSArray<NSString *> *)recentAppsWithCount:(int)count;
++ (NSArray<NSString *> *)quickSwitchBundleIdentifiers;
++ (UIImage *)imageForBundleId:(NSString *)bundleId;
++ (NSString *)frontMostBundleId;
++ (BOOL)isUserFacingApplicationBundleId:(NSString *)bundleId;
++ (UIInterfaceOrientationMask)supportedInterfaceOrientationsForBundleId:(NSString *)bundleId;
++ (UIInterfaceOrientation)preferredHostedInterfaceOrientationForBundleId:(NSString *)bundleId;
 
-+(NSArray *)recentAppsWithCount:(int)count;
-+(UIImage *)imageForBundleId:(NSString *)bundleId;
-+(NSString *)frontMostBundleId;
++ (NSUserDefaults *)settingsDefaults;
++ (NSDictionary<NSString *, id> *)settings;
++ (void)reloadSettings;
++ (BOOL)isEnabled;
++ (BOOL)isExternalURLRoutingEnabled;
++ (BOOL)isExternalURLRoutingTargetBundleId:(NSString *)bundleId;
 
-+(NSUserDefaults *)settingsDefaults;
-+(NSMutableDictionary *)settings;
-+(void)setSetting:(id)value forKey:(NSString *)key;
-
-+(NSMutableDictionary *)authorization;
-
-+(UIImage *)iconImageForIdentifier:(NSString *)identifier;
++ (UIImage *)iconImageForIdentifier:(NSString *)identifier;
 
 @end
