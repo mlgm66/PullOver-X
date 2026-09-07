@@ -309,7 +309,8 @@ static id POSharedObjectForClass(Class cls) {
         [defaults registerDefaults:@{
             @"enabled": @YES,
             @"favorites": @[],
-            @"recentAppsCount": @5,
+            @"recentAppsCount": @12,
+            @"quickSwitchAppSlots": @12,
             @"style": @"Recent Apps",
             @"leftHanded": @NO,
             @"hideOnScreenshot": @YES,
@@ -325,6 +326,7 @@ static id POSharedObjectForClass(Class cls) {
             @"landscapeKeyboardZoom": @YES,
             @"autoNub": @NO,
             @"autoNub-time": @0,
+            @"handleActivationGuard": @NO,
             POEnabledPendingRespringKey: @NO,
         }];
     });

@@ -5,4 +5,6 @@
 "Seconds" = "秒";
 "Show %d Recent App" = "显示 %d 个最近应用";
 "Show %d Recent Apps" = "显示 %d 个最近应用";
+"Show %d Application Slot" = "显示 %d 个应用槽位";
+"Show %d Application Slots" = "显示 %d 个应用槽位";
 "Nub After %@ %@" = "延迟 %@ %@后收起";

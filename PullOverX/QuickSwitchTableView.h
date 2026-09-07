@@ -28,7 +28,8 @@ typedef NS_ENUM(NSUInteger, POQuickSwitchEntryKind) {
 
 FOUNDATION_EXPORT NSArray<NSArray<POQuickSwitchEntry *> *> *POQuickSwitchBuildPages(
     NSArray<NSString *> *bundleIdentifiers,
-    NSUInteger slotCount
+    NSUInteger applicationSlotLimit,
+    NSUInteger screenSlotLimit
 );
 
 @interface POQuickSwitchSelectionFeedback : NSObject

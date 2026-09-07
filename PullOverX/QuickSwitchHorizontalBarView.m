@@ -554,13 +554,17 @@
             availableWidth - POQuickSwitchMenuEdgePadding * 2.0) / QS_HORIZONTAL_ITEM_STRIDE);
         slotCount = anchorSlotCount;
         NSArray<NSString *> *allItems = [POApplicationHelper quickSwitchBundleIdentifiers];
-        pages = POQuickSwitchBuildPages(allItems, slotCount);
+        NSUInteger applicationSlotLimit = (NSUInteger)MAX(1,
+            [settings[@"quickSwitchAppSlots"] integerValue]);
+        pages = POQuickSwitchBuildPages(allItems,
+                                        applicationSlotLimit,
+                                        slotCount);
         if (pages.count == 0) {
             isPresenting = NO;
             return NO;
         }
 
-        currentPageIndex = 0;
+        currentPageIndex = MIN(currentPageIndex, pages.count - 1);
         presentationAnchorX = extendsRight ? CGRectGetMinX(handleFrame) : CGRectGetMaxX(handleFrame);
         presentationOriginY = CGRectGetMaxY(anchorFrame) + QS_HORIZONTAL_CARD_GAP;
         CGFloat width = QS_HORIZONTAL_ITEM_STRIDE * [self visibleSlotCountForPageIndex:currentPageIndex] +

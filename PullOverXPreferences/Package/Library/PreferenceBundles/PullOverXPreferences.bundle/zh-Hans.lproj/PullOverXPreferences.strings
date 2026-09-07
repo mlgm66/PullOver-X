@@ -2,9 +2,11 @@
 "QuickSwitch" = "快速切换";
 "Hold the grabber when closed to show the quickswitch menu. Slide up and down to select." = "长按把手显示菜单，上下滑动进行选择，拖到中间区域快速跳转到应用内";
 "Style" = "样式";
+"App Display" = "应用显示";
+"Recently Used" = "最近使用";
 "Recent Apps" = "最近应用";
 "Favorite Apps" = "收藏应用";
-"Select Favorite Apps" = "选择收藏的应用";
+"Select Favorite Apps" = "选择收藏应用";
 "Appearance" = "外观";
 "Hide Handle When Taking Screenshot" = "截图时隐藏把手";
 "Hide QuickSwitch Labels" = "隐藏快速切换标签";
@@ -20,7 +22,8 @@
 "Sound Feedback" = "声音反馈";
 "Keyboard Avoiding" = "键盘避让";
 "Enlarge Keyboard in Landscape" = "横屏放大键盘";
-"Auto-Nubbing" = "自动收起";
+"Handle" = "把手";
+"Handle Activation Guard" = "把手防误触";
 "Auto-Nub Handle when Inactive" = "不活动时自动收起把手";
 "Handle Size" = "把手大小";
 "Handle Hidden Percentage" = "隐藏比例";

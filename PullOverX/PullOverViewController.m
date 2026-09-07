@@ -27,6 +27,7 @@
 #define PO_HANDLE_CARD_SCALE_ANIMATION_DURATION 0.25
 #define PO_SCALED_PROGRAMMATIC_CLOSE_DURATION 0.28
 #define PO_SCALED_CLOSE_POST_COMMIT_CLEANUP_DELAY 0.035
+#define PO_HANDLE_GUARD_MINIMUM_REVEAL_DURATION 2.0
 
 typedef NS_OPTIONS(NSUInteger, POKeyboardZoomSuspensionReason) {
     POKeyboardZoomSuspensionNone     = 0,
@@ -71,10 +72,13 @@ typedef NS_ENUM(NSUInteger, POInteractionMode) {
     POInteractionModeQuickSwitchModal,
 };
 
-typedef NS_ENUM(NSUInteger, POPanelPanIntent) {
-    POPanelPanIntentNone,
-    POPanelPanIntentHorizontalPanel,
-    POPanelPanIntentVerticalCardMove,
+typedef NS_ENUM(NSUInteger, POHandlePanIntent) {
+    POHandlePanIntentNone,
+    POHandlePanIntentRevealHandle,
+    POHandlePanIntentNubHandle,
+    POHandlePanIntentOpenPanel,
+    POHandlePanIntentClosePanel,
+    POHandlePanIntentVerticalCardMove,
 };
 
 static BOOL POIsConcretePresentationOrientation(UIInterfaceOrientation orientation) {
@@ -153,7 +157,8 @@ static CGFloat POPresentationAngleForOrientation(UIInterfaceOrientation orientat
     UIInterfaceOrientation hostedLayoutOrientation;
     BOOL pendingOpenState;
     CGFloat panelPanStartOffsetX;
-    POPanelPanIntent panelPanIntent;
+    POHandlePanIntent handlePanIntent;
+    BOOL handlePanStartedNubbed;
     CGFloat panelVerticalMoveStartAnchorY;
     BOOL scrollSnapAnimationInProgress;
     BOOL quickSwitchOpeningApp;
@@ -217,6 +222,7 @@ static CGFloat POPresentationAngleForOrientation(UIInterfaceOrientation orientat
 -(void)dismissPresentedQuickSwitchMenuImmediately;
 -(void)hideQuickSwitchBackdropImmediately;
 -(void)refreshHandleIconIfNeeded;
+-(void)resetAutoNubTimerWithMinimumDelay:(NSTimeInterval)minimumDelay;
 
 @end
 
@@ -697,6 +703,34 @@ static CGFloat POPresentationAngleForOrientation(UIInterfaceOrientation orientat
 -(BOOL)isPanelTransitioning{
     return panelState == POPanelStateOpening || panelState == POPanelStateClosing ||
         panelState == POPanelStateInteractive || scrollSnapAnimationInProgress;
+}
+
+-(BOOL)isHandleVisiblyNubbed{
+    return self.handle.layoutMode == POHandleLayoutModeVerticalRail && self.handle.isNubbed;
+}
+
+-(BOOL)isHandleActivationGuardActive{
+    return panelState == POPanelStateClosed && [self isHandleVisiblyNubbed] &&
+        [[POApplicationHelper settings][@"handleActivationGuard"] boolValue];
+}
+
+-(POHandlePanIntent)horizontalHandlePanIntentForVelocityX:(CGFloat)velocityX{
+    if (panelState == POPanelStateClosed) {
+        if (velocityX < 0) {
+            return [self isHandleActivationGuardActive]
+                ? POHandlePanIntentRevealHandle
+                : POHandlePanIntentOpenPanel;
+        }
+        if (velocityX > 0 && self.handle.layoutMode == POHandleLayoutModeVerticalRail &&
+            !self.handle.isNubbed) {
+            return POHandlePanIntentNubHandle;
+        }
+        return POHandlePanIntentNone;
+    }
+    if (panelState == POPanelStateOpen && velocityX > 0) {
+        return POHandlePanIntentClosePanel;
+    }
+    return POHandlePanIntentNone;
 }
 
 -(void)cancelPresentationHandoff{
@@ -1687,7 +1721,7 @@ static CGFloat POPresentationAngleForOrientation(UIInterfaceOrientation orientat
     BOOL scrollPanActive = panState == UIGestureRecognizerStateBegan ||
         panState == UIGestureRecognizerStateChanged;
     if (!scrollView.dragging && !scrollView.decelerating &&
-        !scrollSnapAnimationInProgress && !scrollPanActive && panelPanIntent == POPanelPanIntentNone) {
+        !scrollSnapAnimationInProgress && !scrollPanActive && handlePanIntent == POHandlePanIntentNone) {
         keyboardZoomSuspensionReasons &= ~POKeyboardZoomSuspensionDragging;
     }
     [self applyResolvedCardScaleAnimated:animated source:source];
@@ -1736,7 +1770,7 @@ static CGFloat POPresentationAngleForOrientation(UIInterfaceOrientation orientat
 
 -(void)finishPanelDragZoomIfIdle{
     if (scrollView.dragging || scrollView.decelerating || scrollSnapAnimationInProgress ||
-        panelPanIntent != POPanelPanIntentNone) {
+        handlePanIntent != POHandlePanIntentNone) {
         return;
     }
     [self removeKeyboardZoomSuspension:POKeyboardZoomSuspensionDragging];
@@ -1897,7 +1931,7 @@ static CGFloat POPresentationAngleForOrientation(UIInterfaceOrientation orientat
                                                   toOrientation:(UIInterfaceOrientation)toOrientation{
     if (panelState != POPanelStateOpen || !contextView || contextView.hidden ||
         keyboardZoomContainer.hidden || presentationRetainedAfterRelease ||
-        panelPanIntent != POPanelPanIntentNone || scrollSnapAnimationInProgress ||
+        handlePanIntent != POHandlePanIntentNone || scrollSnapAnimationInProgress ||
         presentedQuickSwitchMenu || (quickSwitchInteractionOverlayView && !quickSwitchInteractionOverlayView.hidden)) {
         return NO;
     }
@@ -2116,7 +2150,7 @@ static CGFloat POPresentationAngleForOrientation(UIInterfaceOrientation orientat
 -(BOOL)canBeginQuickSwitchSession{
     if (presentedQuickSwitchMenu || scrollSnapAnimationInProgress ||
         scrollView.dragging || scrollView.decelerating ||
-        panelPanIntent != POPanelPanIntentNone || hostedCategoryTransitionPending ||
+        handlePanIntent != POHandlePanIntentNone || hostedCategoryTransitionPending ||
         runtimeHostedCategoryTransitionAnimating || handleVisualHandoffSnapshotView) {
         return NO;
     }
@@ -2207,6 +2241,10 @@ static CGFloat POPresentationAngleForOrientation(UIInterfaceOrientation orientat
 -(void)preparePanelForOpenPresentationIfNeeded{
     if (panelState != POPanelStateClosed) {
         return;
+    }
+
+    if ([self isHandleVisiblyNubbed]) {
+        self.handle.isNubbed = NO;
     }
 
     POQuickSwitchLayoutMode previousLayoutMode = [self currentQuickSwitchLayoutMode];
@@ -2410,7 +2448,7 @@ static CGFloat POPresentationAngleForOrientation(UIInterfaceOrientation orientat
 
 -(void)applyPortraitHostedLandscapeVerticalHandleAnchorY:(CGFloat)handleAnchorY{
     if (![self canMovePortraitHostedLandscapeCardVertically] &&
-        panelPanIntent != POPanelPanIntentVerticalCardMove) {
+        handlePanIntent != POHandlePanIntentVerticalCardMove) {
         return;
     }
     CGFloat cardHeight = CGRectGetHeight(keyboardZoomBaseFrame);
@@ -2452,7 +2490,7 @@ static CGFloat POPresentationAngleForOrientation(UIInterfaceOrientation orientat
         : 0;
     BOOL preserveInteractiveOffset =
         scrollView.dragging || scrollView.decelerating || scrollSnapAnimationInProgress ||
-        panelPanIntent != POPanelPanIntentNone;
+        handlePanIntent != POHandlePanIntentNone;
 
     keyboardZoomGeneration += 1;
     [keyboardZoomContainer.layer removeAllAnimations];
@@ -2643,8 +2681,8 @@ static CGFloat POPresentationAngleForOrientation(UIInterfaceOrientation orientat
     if (hostedCategoryTransitionPending || runtimeHostedCategoryTransitionAnimating || handleVisualHandoffSnapshotView) {
         [self cancelRuntimeHostedCategoryTransition];
     }
-    if (panelPanIntent == POPanelPanIntentVerticalCardMove) {
-        panelPanIntent = POPanelPanIntentNone;
+    if (handlePanIntent == POHandlePanIntentVerticalCardMove) {
+        handlePanIntent = POHandlePanIntentNone;
         panelVerticalMoveStartAnchorY = 0;
     }
     if (presentedQuickSwitchMenu) {
@@ -3030,6 +3068,11 @@ static CGFloat POPresentationAngleForOrientation(UIInterfaceOrientation orientat
         return;
     }
     if (panelState == POPanelStateClosed) {
+        if ([self isHandleActivationGuardActive]) {
+            self.handle.isNubbed = NO;
+            [self resetAutoNubTimerWithMinimumDelay:PO_HANDLE_GUARD_MINIMUM_REVEAL_DURATION];
+            return;
+        }
         [self open];
         return;
     }
@@ -3045,7 +3088,8 @@ static CGFloat POPresentationAngleForOrientation(UIInterfaceOrientation orientat
 
 -(void)handle:(POHandle *)handle didPanPanel:(UIPanGestureRecognizer *)recognizer{
     if (recognizer.state == UIGestureRecognizerStateBegan) {
-        panelPanIntent = POPanelPanIntentNone;
+        handlePanIntent = POHandlePanIntentNone;
+        handlePanStartedNubbed = self.handle.isNubbed;
         if ([self isPanelTransitioning]) {
             return;
         }
@@ -3060,7 +3104,7 @@ static CGFloat POPresentationAngleForOrientation(UIInterfaceOrientation orientat
             if (!isfinite(currentHandleY)) {
                 return;
             }
-            panelPanIntent = POPanelPanIntentVerticalCardMove;
+            handlePanIntent = POHandlePanIntentVerticalCardMove;
             portraitHostedLandscapeHandleAnchorY = currentHandleY;
             panelVerticalMoveStartAnchorY = currentHandleY;
             [self cancelAutoNubTimer];
@@ -3068,26 +3112,54 @@ static CGFloat POPresentationAngleForOrientation(UIInterfaceOrientation orientat
             return;
         }
 
-        panelPanIntent = POPanelPanIntentHorizontalPanel;
-        [self beginSplitSessionIfNeeded];
+        handlePanIntent = [self horizontalHandlePanIntentForVelocityX:velocity.x];
+        switch (handlePanIntent) {
+            case POHandlePanIntentRevealHandle:
+                [self cancelAutoNubTimer];
+                self.handle.isNubbed = NO;
+                return;
+
+            case POHandlePanIntentNubHandle:
+                [self cancelAutoNubTimer];
+                self.handle.isNubbed = YES;
+                return;
+
+            case POHandlePanIntentOpenPanel:
+                if ([self isHandleVisiblyNubbed]) {
+                    self.handle.isNubbed = NO;
+                }
+                pendingOpenState = NO;
+                [self beginSplitSessionIfNeeded];
+                break;
+
+            case POHandlePanIntentClosePanel:
+                pendingOpenState = YES;
+                break;
+
+            case POHandlePanIntentNone:
+            case POHandlePanIntentVerticalCardMove:
+                return;
+        }
+
         panelPanStartOffsetX = scrollView.contentOffset.x;
         [self scrollViewWillBeginDragging:scrollView];
         return;
     }
 
     if (recognizer.state == UIGestureRecognizerStateChanged) {
-        if (panelPanIntent == POPanelPanIntentVerticalCardMove) {
+        if (handlePanIntent == POHandlePanIntentVerticalCardMove) {
             CGFloat translationY = [recognizer translationInView:self.view].y;
             [self applyPortraitHostedLandscapeVerticalHandleAnchorY:
                 panelVerticalMoveStartAnchorY + translationY];
             return;
         }
-        if (panelPanIntent != POPanelPanIntentHorizontalPanel) {
+        if (handlePanIntent != POHandlePanIntentOpenPanel &&
+            handlePanIntent != POHandlePanIntentClosePanel) {
             return;
         }
         CGFloat translationX = [recognizer translationInView:self.view].x;
         CGFloat maximumOffset = [self maximumContentOffsetX];
-        CGFloat nextOffset = MIN(panelPanStartOffsetX - translationX, maximumOffset);
+        CGFloat nextOffset = MIN(MAX(0, panelPanStartOffsetX - translationX), maximumOffset);
         [scrollView setContentOffset:CGPointMake(nextOffset, 0) animated:NO];
         return;
     }
@@ -3095,26 +3167,52 @@ static CGFloat POPresentationAngleForOrientation(UIInterfaceOrientation orientat
     if (recognizer.state == UIGestureRecognizerStateEnded ||
         recognizer.state == UIGestureRecognizerStateCancelled ||
         recognizer.state == UIGestureRecognizerStateFailed) {
-        if (panelPanIntent == POPanelPanIntentVerticalCardMove) {
+        if (handlePanIntent == POHandlePanIntentVerticalCardMove) {
             CGFloat translationY = [recognizer translationInView:self.view].y;
             [self applyPortraitHostedLandscapeVerticalHandleAnchorY:
                 panelVerticalMoveStartAnchorY + translationY];
-            panelPanIntent = POPanelPanIntentNone;
+            handlePanIntent = POHandlePanIntentNone;
             [self resetAutoNubTimer];
             return;
         }
-        if (panelPanIntent != POPanelPanIntentHorizontalPanel) {
-            panelPanIntent = POPanelPanIntentNone;
+        if (handlePanIntent == POHandlePanIntentRevealHandle) {
+            BOOL cancelled = recognizer.state == UIGestureRecognizerStateCancelled ||
+                recognizer.state == UIGestureRecognizerStateFailed;
+            handlePanIntent = POHandlePanIntentNone;
+            if (cancelled) {
+                self.handle.isNubbed = handlePanStartedNubbed;
+            } else {
+                [self resetAutoNubTimerWithMinimumDelay:PO_HANDLE_GUARD_MINIMUM_REVEAL_DURATION];
+            }
             return;
         }
-        CGFloat maximumOffset = [self maximumContentOffsetX];
-        CGFloat velocityX = [recognizer velocityInView:self.view].x;
-        if (fabs(velocityX) > 120) {
-            pendingOpenState = velocityX < 0;
-        } else {
-            pendingOpenState = scrollView.contentOffset.x >= maximumOffset / 2.0;
+        if (handlePanIntent == POHandlePanIntentNubHandle) {
+            if (recognizer.state == UIGestureRecognizerStateCancelled ||
+                recognizer.state == UIGestureRecognizerStateFailed) {
+                self.handle.isNubbed = handlePanStartedNubbed;
+            }
+            handlePanIntent = POHandlePanIntentNone;
+            return;
         }
-        panelPanIntent = POPanelPanIntentNone;
+        if (handlePanIntent != POHandlePanIntentOpenPanel &&
+            handlePanIntent != POHandlePanIntentClosePanel) {
+            handlePanIntent = POHandlePanIntentNone;
+            return;
+        }
+
+        if (recognizer.state == UIGestureRecognizerStateCancelled ||
+            recognizer.state == UIGestureRecognizerStateFailed) {
+            pendingOpenState = handlePanIntent == POHandlePanIntentClosePanel;
+        } else {
+            CGFloat maximumOffset = [self maximumContentOffsetX];
+            CGFloat velocityX = [recognizer velocityInView:self.view].x;
+            if (fabs(velocityX) > 120) {
+                pendingOpenState = velocityX < 0;
+            } else {
+                pendingOpenState = scrollView.contentOffset.x >= maximumOffset / 2.0;
+            }
+        }
+        handlePanIntent = POHandlePanIntentNone;
         [self scrollViewDidEndDragging:scrollView willDecelerate:NO];
     }
 }
@@ -3753,18 +3851,6 @@ static CGFloat POPresentationAngleForOrientation(UIInterfaceOrientation orientat
         if (panelState == POPanelStateInteractive && !interactiveHostIntentIssued && rawOffsetX > 0.5) {
             [self issueInteractiveHostIntentIfNeeded];
         }
-
-        if (![self isHorizontalQuickSwitchLayoutMode]) {
-            if (rawOffsetX < -0.5) {
-                if (!self.handle.isNubbed) {
-                    self.handle.isNubbed = YES;
-                }
-            } else if (rawOffsetX > 0.5) {
-                if (self.handle.isNubbed) {
-                    self.handle.isNubbed = NO;
-                }
-            }
-        }
     }
 }
 
@@ -3773,13 +3859,18 @@ static CGFloat POPresentationAngleForOrientation(UIInterfaceOrientation orientat
 }
 
 -(void)resetAutoNubTimer{
+    [self resetAutoNubTimerWithMinimumDelay:0];
+}
+
+-(void)resetAutoNubTimerWithMinimumDelay:(NSTimeInterval)minimumDelay{
     [self cancelAutoNubTimer];
     if ([self isHorizontalQuickSwitchLayoutMode] ||
         ![[POApplicationHelper settings][@"autoNub"] boolValue] || [self isPanelActive] || self.handle.isNubbed) {
         return;
     }
 
-    NSTimeInterval delay = MAX(0, [[POApplicationHelper settings][@"autoNub-time"] doubleValue]);
+    NSTimeInterval configuredDelay = MAX(0, [[POApplicationHelper settings][@"autoNub-time"] doubleValue]);
+    NSTimeInterval delay = MAX(configuredDelay, minimumDelay);
     [self performSelector:@selector(autoNubAfterDelay) withObject:nil afterDelay:delay];
 }
 
@@ -3964,7 +4055,7 @@ static CGFloat POPresentationAngleForOrientation(UIInterfaceOrientation orientat
     deferScaledCloseSessionCleanup = NO;
     [keyboardZoomContainer.layer removeAllAnimations];
     [handleScrollView.layer removeAllAnimations];
-    panelPanIntent = POPanelPanIntentNone;
+    handlePanIntent = POHandlePanIntentNone;
     pendingOpenState = NO;
     interactiveHostIntentIssued = NO;
     interactiveHostResumeRequired = NO;

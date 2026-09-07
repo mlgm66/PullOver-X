@@ -6,6 +6,8 @@
 
 @interface POStepperTableCell : PSControlTableCell
 @property (nonatomic, retain) UIStepper *control;
+@property (nonatomic, copy) NSString *singularLabelFormat;
+@property (nonatomic, copy) NSString *pluralLabelFormat;
 @end
 
 @implementation POStepperTableCell
@@ -21,6 +23,15 @@
 }
 
 - (void)refreshCellContentsWithSpecifier:(PSSpecifier *)specifier {
+	NSNumber *minimumValue = [specifier propertyForKey:@"minimumValue"];
+	NSNumber *maximumValue = [specifier propertyForKey:@"maximumValue"];
+	NSNumber *stepValue = [specifier propertyForKey:@"stepValue"];
+	self.control.minimumValue = minimumValue ? minimumValue.doubleValue : 1;
+	self.control.maximumValue = maximumValue ? maximumValue.doubleValue : 99;
+	self.control.stepValue = stepValue ? stepValue.doubleValue : 1;
+	self.singularLabelFormat = [specifier propertyForKey:@"singularLabelFormat"];
+	self.pluralLabelFormat = [specifier propertyForKey:@"pluralLabelFormat"]
+		?: [specifier propertyForKey:@"labelFormat"];
 	[super refreshCellContentsWithSpecifier:specifier];
 	self.control.frame = CGRectMake(0, 0, 96, 32);
 	self.accessoryView = self.control;
@@ -43,7 +54,8 @@
 
 - (void)setValue:(NSNumber *)value {
 	[super setValue:value];
-    self.control.value = value.doubleValue;
+	self.control.value = value.doubleValue;
+	[self _updateLabel];
 }
 
 - (void)controlChanged:(UIStepper *)stepper {
@@ -57,7 +69,12 @@
 	}
 
 	int value = (int)self.control.value;
-	NSString *key = value == 1 ? @"Show %d Recent App" : @"Show %d Recent Apps";
+	NSString *key = value == 1 && self.singularLabelFormat.length > 0
+		? self.singularLabelFormat
+		: self.pluralLabelFormat;
+	if (key.length == 0) {
+		key = @"%d";
+	}
 	NSString *format = POLocalizedString(key, @"Tweak");
 	self.textLabel.text = [NSString stringWithFormat:format, value];
 

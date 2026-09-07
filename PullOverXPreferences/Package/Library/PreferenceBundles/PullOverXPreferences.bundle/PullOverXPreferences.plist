@@ -45,18 +45,24 @@
 			<string>Hold the grabber when closed to show the quickswitch menu. Slide up and down to select.</string>
 		</dict>
 		<dict>
-			<key>cell</key>
-			<string>PSSegmentCell</string>
+			<key>cellClass</key>
+			<string>POCompactSegmentTableCell</string>
 			<key>default</key>
 			<string>Recent Apps</string>
 			<key>key</key>
 			<string>style</string>
 			<key>label</key>
-			<string>Style</string>
-			<key>valuesDataSource</key>
-			<string>stylesDataSource</string>
-			<key>titlesDataSource</key>
-			<string>styleTitlesDataSource</string>
+			<string>App Display</string>
+			<key>validValues</key>
+			<array>
+				<string>Recent Apps</string>
+				<string>Favorite Apps</string>
+			</array>
+			<key>validTitles</key>
+			<array>
+				<string>Recently Used</string>
+				<string>Favorite Apps</string>
+			</array>
 			<key>defaults</key>
 			<string>com.mlgm.pulloverx</string>
 			<key>set</key>
@@ -68,13 +74,49 @@
 			<key>cellClass</key>
 			<string>POStepperTableCell</string>
 			<key>default</key>
-			<integer>5</integer>
+			<integer>12</integer>
+			<key>key</key>
+			<string>quickSwitchAppSlots</string>
+			<key>id</key>
+			<string>quickSwitchAppSlots</string>
+			<key>singularLabelFormat</key>
+			<string>Show %d Application Slot</string>
+			<key>pluralLabelFormat</key>
+			<string>Show %d Application Slots</string>
+			<key>minimumValue</key>
+			<integer>1</integer>
+			<key>maximumValue</key>
+			<integer>99</integer>
+			<key>stepValue</key>
+			<integer>1</integer>
+			<key>defaults</key>
+			<string>com.mlgm.pulloverx</string>
+			<key>get</key>
+			<string>getValueForSpecifier:</string>
+			<key>set</key>
+			<string>setValue:forSpecifier:</string>
+		</dict>
+		<dict>
+			<key>cellClass</key>
+			<string>POStepperTableCell</string>
+			<key>default</key>
+			<integer>12</integer>
 			<key>key</key>
 			<string>recentAppsCount</string>
 			<key>id</key>
 			<string>recentAppsCount</string>
 			<key>label</key>
 			<string></string>
+			<key>singularLabelFormat</key>
+			<string>Show %d Recent App</string>
+			<key>pluralLabelFormat</key>
+			<string>Show %d Recent Apps</string>
+			<key>minimumValue</key>
+			<integer>1</integer>
+			<key>maximumValue</key>
+			<integer>99</integer>
+			<key>stepValue</key>
+			<integer>1</integer>
 			<key>defaults</key>
 			<string>com.mlgm.pulloverx</string>
 			<key>get</key>
@@ -335,7 +377,23 @@
 			<key>isStaticText</key>
 			<true/>
 			<key>label</key>
-			<string>Auto-Nubbing</string>
+			<string>Handle</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<false/>
+			<key>key</key>
+			<string>handleActivationGuard</string>
+			<key>label</key>
+			<string>Handle Activation Guard</string>
+			<key>defaults</key>
+			<string>com.mlgm.pulloverx</string>
+			<key>set</key>
+			<string>setValue:forSpecifier:</string>
+			<key>get</key>
+			<string>getValueForSpecifier:</string>
 		</dict>
 		<dict>
 			<key>cell</key>

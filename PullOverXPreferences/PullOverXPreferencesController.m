@@ -535,10 +535,6 @@ static NSString * const kPOEnabledPendingRespringKey = @"enabled-respring-pendin
                                          NULL,
                                          true);
 
-    if ([key isEqualToString:@"style"]) {
-        self->_specifiers = nil;
-        [self reloadSpecifiers];
-    }
 }
 
 - (NSUserDefaults *)userDefaultsForSuite:(NSString *)suiteName
@@ -564,7 +560,13 @@ static NSString * const kPOEnabledPendingRespringKey = @"enabled-respring-pendin
             }
 
             NSString *key = [specifier propertyForKey:@"key"];
-            if ([key isEqualToString:@"landscapeBehavior"]) {
+            if ([key isEqualToString:@"style"]) {
+                [specifier setProperty:@[
+                    POLocalizedString(@"Recently Used", @"PullOverXPreferences"),
+                    POLocalizedString(@"Favorite Apps", @"PullOverXPreferences")
+                ] forKey:@"validTitles"];
+                [specifier setProperty:@[@"Recent Apps", @"Favorite Apps"] forKey:@"validValues"];
+            } else if ([key isEqualToString:@"landscapeBehavior"]) {
                 [specifier setProperty:@[
                     POLocalizedString(@"Rotate", @"PullOverXPreferences"),
                     POLocalizedString(@"Lock", @"PullOverXPreferences"),
@@ -573,31 +575,9 @@ static NSString * const kPOEnabledPendingRespringKey = @"enabled-respring-pendin
                 [specifier setProperty:@[@"rotate", @"lock", @"hide"] forKey:@"validValues"];
             }
         }
-
-        BOOL showRecentApps = ![[POApplicationHelper settings][@"style"] isEqualToString:@"Favorite Apps"];
-        NSMutableArray *filteredSpecifiers = [NSMutableArray arrayWithCapacity:_specifiers.count];
-        for (PSSpecifier *specifier in _specifiers) {
-            NSString *identifier = [specifier propertyForKey:@"id"];
-            if (showRecentApps && [identifier isEqualToString:@"favoriteApps"]) {
-                continue;
-            }
-            if (!showRecentApps && [identifier isEqualToString:@"recentAppsCount"]) {
-                continue;
-            }
-            [filteredSpecifiers addObject:specifier];
-        }
-        _specifiers = filteredSpecifiers;
 	}
     
     return _specifiers;
-}
-
--(NSArray *)stylesDataSource{
-    return @[@"Recent Apps", @"Favorite Apps"];
-}
-
--(NSArray *)styleTitlesDataSource{
-    return @[POLocalizedString(@"Recent Apps", @"PullOverXPreferences"), POLocalizedString(@"Favorite Apps", @"PullOverXPreferences")];
 }
 
 -(void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath{

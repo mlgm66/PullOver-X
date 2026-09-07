@@ -2,6 +2,8 @@
 "QuickSwitch" = "QuickSwitch";
 "Hold the grabber when closed to show the quickswitch menu. Slide up and down to select." = "Hold the grabber when closed to show the quickswitch menu. Slide up and down to select.";
 "Style" = "Style";
+"App Display" = "App Display";
+"Recently Used" = "Recently Used";
 "Recent Apps" = "Recent Apps";
 "Favorite Apps" = "Favorite Apps";
 "Select Favorite Apps" = "Select Favorite Apps";
@@ -20,7 +22,8 @@
 "Sound Feedback" = "Sound Feedback";
 "Keyboard Avoiding" = "Keyboard Avoiding";
 "Enlarge Keyboard in Landscape" = "Enlarge Keyboard in Landscape";
-"Auto-Nubbing" = "Auto-Nubbing";
+"Handle" = "Handle";
+"Handle Activation Guard" = "Handle Activation Guard";
 "Auto-Nub Handle when Inactive" = "Auto-Nub Handle when Inactive";
 "Handle Size" = "Handle Size";
 "Handle Hidden Percentage" = "Handle Hidden Percentage";

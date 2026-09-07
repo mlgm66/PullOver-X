@@ -21,8 +21,11 @@
 @interface POHandle () <UIGestureRecognizerDelegate> {
     UILabel *messageLabel;
     UIVisualEffectView *blurView;
+    UITapGestureRecognizer *_tapGestureRecognizer;
     UILongPressGestureRecognizer *quickSwitchLongPress;
     UIPanGestureRecognizer *_panelPanGestureRecognizer;
+    CGPoint tapTouchStartPoint;
+    BOOL hasTapTouchStartPoint;
 }
 
 -(void)applyCurrentPresentationAnimated:(BOOL)animated;
@@ -101,23 +104,23 @@
         [self.layer setShadowRadius:3.5];
         [self.layer setShadowOffset:CGSizeMake(0, 0)];
 
-        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tap:)];
-        tap.delegate = self;
-        [self addGestureRecognizer:tap];
+        _tapGestureRecognizer = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tap:)];
+        _tapGestureRecognizer.delegate = self;
+        [self addGestureRecognizer:_tapGestureRecognizer];
 
         quickSwitchLongPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(longPress:)];
         quickSwitchLongPress.minimumPressDuration = .3f;
         quickSwitchLongPress.delegate = self;
         quickSwitchLongPress.cancelsTouchesInView = NO;
         [self addGestureRecognizer:quickSwitchLongPress];
-        [tap requireGestureRecognizerToFail:quickSwitchLongPress];
+        [_tapGestureRecognizer requireGestureRecognizerToFail:quickSwitchLongPress];
         _panelPanGestureRecognizer = [[UIPanGestureRecognizer alloc] initWithTarget:self
                                                                             action:@selector(panelPan:)];
         _panelPanGestureRecognizer.delegate = self;
         _panelPanGestureRecognizer.maximumNumberOfTouches = 1;
         [self addGestureRecognizer:_panelPanGestureRecognizer];
         [_panelPanGestureRecognizer requireGestureRecognizerToFail:quickSwitchLongPress];
-        [tap requireGestureRecognizerToFail:_panelPanGestureRecognizer];
+        [_tapGestureRecognizer requireGestureRecognizerToFail:_panelPanGestureRecognizer];
         
         UIBlurEffect *blur = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial];
         blurView = [[UIVisualEffectView alloc] initWithEffect:blur];
@@ -234,6 +237,11 @@
 }
 
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
+    if (gestureRecognizer == _tapGestureRecognizer && hasTapTouchStartPoint) {
+        hasTapTouchStartPoint = NO;
+        CGPoint endPoint = [gestureRecognizer locationInView:self];
+        return hypot(endPoint.x - tapTouchStartPoint.x, endPoint.y - tapTouchStartPoint.y) <= 5.0;
+    }
     if (gestureRecognizer == _panelPanGestureRecognizer) {
         CGPoint velocity = [(UIPanGestureRecognizer *)gestureRecognizer velocityInView:self];
         CGFloat absX = fabs(velocity.x);
@@ -242,6 +250,14 @@
             return MAX(absX, absY) > 0.0 && fabs(absX - absY) > 0.01;
         }
         return absX > absY;
+    }
+    return YES;
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    if (gestureRecognizer == _tapGestureRecognizer) {
+        tapTouchStartPoint = [touch locationInView:self];
+        hasTapTouchStartPoint = YES;
     }
     return YES;
 }

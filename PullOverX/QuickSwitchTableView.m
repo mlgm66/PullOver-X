@@ -126,9 +126,10 @@
 
 NSArray<NSArray<POQuickSwitchEntry *> *> *POQuickSwitchBuildPages(
     NSArray<NSString *> *bundleIdentifiers,
-    NSUInteger slotCount
+    NSUInteger applicationSlotLimit,
+    NSUInteger screenSlotLimit
 ) {
-    if (bundleIdentifiers.count == 0 || slotCount == 0) {
+    if (bundleIdentifiers.count == 0 || applicationSlotLimit == 0 || screenSlotLimit == 0) {
         return @[];
     }
 
@@ -138,39 +139,50 @@ NSArray<NSArray<POQuickSwitchEntry *> *> *POQuickSwitchBuildPages(
         [applicationEntries addObject:
             [POQuickSwitchEntry applicationEntryWithBundleIdentifier:bundleIdentifier]];
     }
-    if (applicationEntries.count <= slotCount) {
+    NSUInteger singlePageCapacity = MIN(applicationSlotLimit, screenSlotLimit);
+    if (applicationEntries.count <= singlePageCapacity) {
         return @[[applicationEntries copy]];
-    }
-    if (slotCount < 3) {
-        return @[];
     }
 
     NSMutableArray<NSArray<POQuickSwitchEntry *> *> *result = [NSMutableArray array];
     NSUInteger cursor = 0;
-    NSUInteger firstPageCount = slotCount - 1;
-    NSMutableArray<POQuickSwitchEntry *> *firstPage = [NSMutableArray arrayWithCapacity:slotCount];
-    [firstPage addObjectsFromArray:
-        [applicationEntries subarrayWithRange:NSMakeRange(cursor, firstPageCount)]];
-    cursor += firstPageCount;
-    [firstPage addObject:[POQuickSwitchEntry nextPageEntry]];
-    [result addObject:firstPage];
+    while (cursor < applicationEntries.count) {
+        BOOL hasPreviousPage = result.count > 0;
+        NSUInteger reservedSlots = hasPreviousPage ? 1 : 0;
+        if (screenSlotLimit <= reservedSlots) {
+            return @[];
+        }
 
-    while (applicationEntries.count - cursor > slotCount - 1) {
-        NSMutableArray<POQuickSwitchEntry *> *middlePage = [NSMutableArray arrayWithCapacity:slotCount];
-        [middlePage addObject:[POQuickSwitchEntry previousPageEntry]];
-        NSUInteger middlePageCount = slotCount - 2;
-        [middlePage addObjectsFromArray:
-            [applicationEntries subarrayWithRange:NSMakeRange(cursor, middlePageCount)]];
-        cursor += middlePageCount;
-        [middlePage addObject:[POQuickSwitchEntry nextPageEntry]];
-        [result addObject:middlePage];
+        NSUInteger remainingCount = applicationEntries.count - cursor;
+        NSUInteger finalPageCapacity = MIN(applicationSlotLimit,
+                                           screenSlotLimit - reservedSlots);
+        BOOL hasNextPage = remainingCount > finalPageCapacity;
+        if (hasNextPage) {
+            reservedSlots += 1;
+        }
+        if (screenSlotLimit <= reservedSlots) {
+            return @[];
+        }
+
+        NSUInteger pageApplicationCount = MIN(remainingCount,
+            MIN(applicationSlotLimit, screenSlotLimit - reservedSlots));
+        if (pageApplicationCount == 0) {
+            return @[];
+        }
+
+        NSMutableArray<POQuickSwitchEntry *> *page =
+            [NSMutableArray arrayWithCapacity:pageApplicationCount + reservedSlots];
+        if (hasPreviousPage) {
+            [page addObject:[POQuickSwitchEntry previousPageEntry]];
+        }
+        [page addObjectsFromArray:
+            [applicationEntries subarrayWithRange:NSMakeRange(cursor, pageApplicationCount)]];
+        cursor += pageApplicationCount;
+        if (hasNextPage) {
+            [page addObject:[POQuickSwitchEntry nextPageEntry]];
+        }
+        [result addObject:page];
     }
-
-    NSMutableArray<POQuickSwitchEntry *> *lastPage = [NSMutableArray arrayWithCapacity:slotCount];
-    [lastPage addObject:[POQuickSwitchEntry previousPageEntry]];
-    [lastPage addObjectsFromArray:
-        [applicationEntries subarrayWithRange:NSMakeRange(cursor, applicationEntries.count - cursor)]];
-    [result addObject:lastPage];
     return result;
 }
 
@@ -670,14 +682,18 @@ NSArray<NSArray<POQuickSwitchEntry *> *> *POQuickSwitchBuildPages(
         NSUInteger screenSlotCount = (NSUInteger)floor(MAX(0,
             availableHeight - POQuickSwitchMenuEdgePadding * 2.0) / QS_ROW_HEIGHT);
         slotCount = screenSlotCount;
-        pages = POQuickSwitchBuildPages(allBundleIdentifiers, slotCount);
+        NSUInteger applicationSlotLimit = (NSUInteger)MAX(1,
+            [settings[@"quickSwitchAppSlots"] integerValue]);
+        pages = POQuickSwitchBuildPages(allBundleIdentifiers,
+                                        applicationSlotLimit,
+                                        slotCount);
         if (pages.count == 0) {
             isPresenting = NO;
             return NO;
         }
 
-        currentPageIndex = 0;
-        items = pages.firstObject;
+        currentPageIndex = MIN(currentPageIndex, pages.count - 1);
+        items = pages[currentPageIndex];
         [self reloadData];
         if ([settings[@"hapticFeedback"] boolValue]) {
             [impactGenerator prepare];
